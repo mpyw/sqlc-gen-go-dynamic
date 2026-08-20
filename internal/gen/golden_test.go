@@ -39,8 +39,8 @@ order by /*%if byName*/ u.name, /*%end*/ u.id`,
 			{Number: 5, Name: "c.status", GoType: "string", NotNull: true},
 		},
 		Row: []query.Column{
-			{Name: "id", GoType: "int64"},
-			{Name: "name", GoType: "string"},
+			{Name: "id", GoType: "int64", NotNull: true},
+			{Name: "name", GoType: "string", NotNull: true},
 		},
 	}
 }

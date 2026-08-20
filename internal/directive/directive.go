@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mpyw/sqlc-gen-bisql/internal/exprtype"
+	"github.com/mpyw/sqlc-gen-go-dynamic/internal/exprtype"
 )
 
 // Param is one entry of sqlc's parameter table: the placeholder number it was

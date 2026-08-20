@@ -1,4 +1,4 @@
-module github.com/mpyw/sqlc-gen-bisql
+module github.com/mpyw/sqlc-gen-go-dynamic
 
 go 1.25.0
 

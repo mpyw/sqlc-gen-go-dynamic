@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mpyw/sqlc-gen-bisql/internal/directive"
-	"github.com/mpyw/sqlc-gen-bisql/internal/exprtype"
+	"github.com/mpyw/sqlc-gen-go-dynamic/internal/directive"
+	"github.com/mpyw/sqlc-gen-go-dynamic/internal/exprtype"
 )
 
 // searchUsersText is Query.text exactly as sqlc v1.31.1 returned it for the

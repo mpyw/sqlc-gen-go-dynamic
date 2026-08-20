@@ -101,7 +101,7 @@ shared core earns its keep.
 | `internal/dialect` | Placeholder generation for the three engines sqlc supports. |
 | `internal/lint` | The mistakes sqlc accepts and this cannot. |
 | `internal/gen` | Emits the Go source: the template constant, the parameter and row types, the method. |
-| `internal/gotype` | Maps a catalog type onto a Go type, and refuses what it does not know. |
+| `internal/gotype` | Maps a catalog type onto a Go type per driver, and refuses what it does not know. |
 | `internal/plugin` | sqlc's process-plugin protocol, over JSON. |
 | `dyn` | The runtime the generated code calls. The only public package. |
 | _(not written)_ | The surrounding package sqlc's own Go codegen emits, and `sqlc.embed`. |
@@ -278,10 +278,29 @@ sql:
         out: gen
         options:
           package: db
+          sql_package: pgx/v5   # or database/sql, the default
           filename: queries.gen.go
 ```
 
 A WASM build would need the generated protobuf types, since that transport is protobuf only.
+
+## Drivers and types
+
+`sql_package` selects the driver, as it does for sqlc's own Go codegen: `database/sql` (the
+default), `pgx/v5`, or `pgx/v4`. pgx drops the `Context` suffix from every method, since all
+of them take one, so the emitted bodies follow the interface it declares. Nothing else about
+them differs.
+
+The types differ where the driver does. PostgreSQL's `numeric` has no standard Go
+counterpart, so it is `pgtype.Numeric` under pgx and **refused** under `database/sql` rather
+than aimed at a string that may not scan; `interval`, `inet` and `cidr` are the same story.
+
+**These are not sqlc's own types.** A nullable column is a pointer here where that codegen
+emits `sql.NullString` or `pgtype.Text`. A pointer scans correctly under both drivers, so the
+generated code is right, but it is not the same API — parity belongs to the fork that takes
+over sqlc's type table, not to a second table written from guesses. What `gotype` will not do
+is invent an entry: an unknown type is a build error naming the type, because a guess
+compiles.
 
 ## Development
 

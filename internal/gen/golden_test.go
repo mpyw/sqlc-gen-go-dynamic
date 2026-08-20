@@ -16,7 +16,15 @@ import (
 // Regenerate with: go test ./internal/gen -run TestGolden -update
 var update = flag.Bool("update", false, "update the golden file")
 
-const goldenPath = "../../testdata/example/db/search_users.gen.go"
+// One golden per driver, since the driver is what the emitted bodies differ by.
+var goldens = []struct {
+	path       string
+	pkg        string
+	sqlPackage string
+}{
+	{"../../testdata/example/db/search_users.gen.go", "db", "database/sql"},
+	{"../../testdata/example/dbpgx/search_users.gen.go", "dbpgx", "pgx/v5"},
+}
 
 func exampleInput() query.Input {
 	return query.Input{
@@ -46,21 +54,27 @@ order by /*%if byName*/ u.name, /*%end*/ u.id`,
 }
 
 func TestGolden(t *testing.T) {
-	out, err := gen.File(gen.Options{Package: "db"}, []*query.Query{prepare(t, exampleInput())})
-	if err != nil {
-		t.Fatalf("gen: %v", err)
-	}
-	if *update {
-		if err := os.WriteFile(goldenPath, out, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		return
-	}
-	want, err := os.ReadFile(goldenPath)
-	if err != nil {
-		t.Fatalf("read golden: %v (regenerate with -update)", err)
-	}
-	if string(out) != string(want) {
-		t.Errorf("%s is stale\n--- got ---\n%s\n--- want ---\n%s", goldenPath, out, want)
+	for _, g := range goldens {
+		t.Run(g.sqlPackage, func(t *testing.T) {
+			out, err := gen.File(
+				gen.Options{Package: g.pkg, SQLPackage: g.sqlPackage},
+				[]*query.Query{prepare(t, exampleInput())})
+			if err != nil {
+				t.Fatalf("gen: %v", err)
+			}
+			if *update {
+				if err := os.WriteFile(g.path, out, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			want, err := os.ReadFile(g.path)
+			if err != nil {
+				t.Fatalf("read golden: %v (regenerate with -update)", err)
+			}
+			if string(out) != string(want) {
+				t.Errorf("%s is stale\n--- got ---\n%s\n--- want ---\n%s", g.path, out, want)
+			}
+		})
 	}
 }

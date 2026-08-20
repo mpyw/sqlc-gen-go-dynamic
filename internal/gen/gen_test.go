@@ -136,3 +136,51 @@ func TestFileRejects(t *testing.T) {
 		}
 	})
 }
+
+// pgx drops the Context suffix from every method, since all of them take one. Nothing else
+// about the body differs.
+func TestFileSQLPackage(t *testing.T) {
+	for _, c := range []struct{ pkg, want, absent string }{
+		{"", "q.db.QueryContext(", "q.db.Query("},
+		{"database/sql", "q.db.QueryContext(", "q.db.Query("},
+		{"pgx/v5", "q.db.Query(", "q.db.QueryContext("},
+		{"pgx/v4", "q.db.Query(", "q.db.QueryContext("},
+	} {
+		t.Run("driver="+c.pkg, func(t *testing.T) {
+			out, err := gen.File(
+				gen.Options{Package: "db", SQLPackage: c.pkg},
+				[]*query.Query{prepare(t, searchUsers())})
+			if err != nil {
+				t.Fatalf("gen: %v", err)
+			}
+			if !strings.Contains(string(out), c.want) {
+				t.Errorf("missing %q", c.want)
+			}
+			if strings.Contains(string(out), c.absent) {
+				t.Errorf("unexpected %q", c.absent)
+			}
+		})
+	}
+	if _, err := gen.File(gen.Options{Package: "db", SQLPackage: "sqlx"}, nil); err == nil ||
+		!strings.Contains(err.Error(), "unsupported sql_package") {
+		t.Errorf("error = %v, want it to reject the driver", err)
+	}
+}
+
+// A type that needs a package brings it into the import block, which nothing collected before.
+func TestFileCollectsImports(t *testing.T) {
+	in := searchUsers()
+	in.Row = append(in.Row,
+		query.Column{Name: "created_at", GoType: "time.Time", Import: "time", NotNull: true},
+		query.Column{Name: "amount", GoType: "pgtype.Numeric", Import: "github.com/jackc/pgx/v5/pgtype", NotNull: true},
+	)
+	out, err := gen.File(gen.Options{Package: "db", SQLPackage: "pgx/v5"}, []*query.Query{prepare(t, in)})
+	if err != nil {
+		t.Fatalf("gen: %v", err)
+	}
+	for _, want := range []string{`"time"`, `"github.com/jackc/pgx/v5/pgtype"`, "CreatedAt time.Time", "Amount    pgtype.Numeric"} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+}

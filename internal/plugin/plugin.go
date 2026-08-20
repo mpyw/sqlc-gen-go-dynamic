@@ -68,11 +68,14 @@ type Identifier struct {
 	Name string `json:"name"`
 }
 
-// Options are this plugin's own settings, from the codegen entry.
+// Options are this plugin's own settings, from the codegen entry. The names match sqlc's own
+// Go codegen where they mean the same thing, so a project switching over does not rewrite
+// them.
 type Options struct {
-	Package  string `json:"package"`
-	Filename string `json:"filename"`
-	Runtime  string `json:"runtime"`
+	Package    string `json:"package"`
+	SQLPackage string `json:"sql_package"`
+	Filename   string `json:"filename"`
+	Runtime    string `json:"runtime"`
 }
 
 // Response is sqlc's GenerateResponse.
@@ -112,7 +115,7 @@ func Generate(req Request) (Response, error) {
 
 	queries := make([]*query.Query, 0, len(req.Queries))
 	for _, q := range sortedQueries(req.Queries) {
-		in, err := input(req.Settings.Engine, q)
+		in, err := input(req.Settings.Engine, opts.SQLPackage, q)
 		if err != nil {
 			return Response{}, err
 		}
@@ -126,7 +129,11 @@ func Generate(req Request) (Response, error) {
 		queries = append(queries, prepared)
 	}
 
-	src, err := gen.File(gen.Options{Package: opts.Package, Runtime: opts.Runtime}, queries)
+	src, err := gen.File(gen.Options{
+		Package:    opts.Package,
+		SQLPackage: opts.SQLPackage,
+		Runtime:    opts.Runtime,
+	}, queries)
 	if err != nil {
 		return Response{}, err
 	}
@@ -135,7 +142,7 @@ func Generate(req Request) (Response, error) {
 
 // input converts one query, resolving every Go type up front so that an unmapped one is
 // reported against the query that needs it.
-func input(engine string, q Query) (query.Input, error) {
+func input(engine, sqlPackage string, q Query) (query.Input, error) {
 	in := query.Input{
 		Name:     q.Name,
 		Cmd:      q.Cmd,
@@ -144,7 +151,7 @@ func input(engine string, q Query) (query.Input, error) {
 		Engine:   engine,
 	}
 	for _, p := range q.Params {
-		t, err := gotype.For(engine, p.Column.Type.Name, p.Column.IsArray, p.Column.ArrayDims)
+		t, err := gotype.For(engine, sqlPackage, p.Column.Type.Name, p.Column.IsArray, p.Column.ArrayDims)
 		if err != nil {
 			return query.Input{}, fmt.Errorf("%s: parameter %s: %w", q.Name, p.Column.Name, err)
 		}
@@ -152,6 +159,7 @@ func input(engine string, q Query) (query.Input, error) {
 			Number:  p.Number,
 			Name:    p.Column.Name,
 			GoType:  t.Name,
+			Import:  t.Import,
 			NotNull: p.Column.NotNull,
 			IsSlice: p.Column.IsSqlcSlice,
 			// sqlc reports the same not_null for sqlc.narg and for a nullable column, so the
@@ -166,11 +174,11 @@ func input(engine string, q Query) (query.Input, error) {
 			in.Row = append(in.Row, col)
 			continue
 		}
-		t, err := gotype.For(engine, c.Type.Name, c.IsArray, c.ArrayDims)
+		t, err := gotype.For(engine, sqlPackage, c.Type.Name, c.IsArray, c.ArrayDims)
 		if err != nil {
 			return query.Input{}, fmt.Errorf("%s: column %s: %w", q.Name, c.Name, err)
 		}
-		col.GoType = t.Name
+		col.GoType, col.Import = t.Name, t.Import
 		in.Row = append(in.Row, col)
 	}
 	return in, nil

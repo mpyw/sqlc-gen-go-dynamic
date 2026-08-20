@@ -9,6 +9,7 @@ package query
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/mpyw/sqlc-gen-go-dynamic/internal/bind"
 	"github.com/mpyw/sqlc-gen-go-dynamic/internal/exprtype"
@@ -25,6 +26,7 @@ type Param struct {
 	Number   int
 	Name     string
 	GoType   string
+	Import   string // the package GoType needs, empty for a builtin
 	NotNull  bool
 	IsSlice  bool
 	Nullable bool // written as sqlc.narg; indistinguishable from a nullable column in the request
@@ -36,6 +38,7 @@ type Param struct {
 type Column struct {
 	Name    string
 	GoType  string
+	Import  string // the package GoType needs, empty for a builtin
 	NotNull bool
 	Embed   string
 }
@@ -60,6 +63,9 @@ type Query struct {
 	Params   *exprtype.Type
 	Row      []Column
 	Engine   string
+
+	// Imports are the packages this query's types need, deduplicated.
+	Imports []string
 }
 
 // Prepare validates and prepares a query. Diagnostics from typing are returned alongside the
@@ -83,6 +89,7 @@ func Prepare(in Input) (*Query, []exprtype.Diagnostic, error) {
 	params, diags := exprtype.Infer(nodes, typeParams(in.Params))
 	exprtype.NameQuery(params, in.Name)
 	return &Query{
+		Imports:  imports(in),
 		Name:     in.Name,
 		Cmd:      in.Cmd,
 		Template: tmpl,
@@ -91,6 +98,28 @@ func Prepare(in Input) (*Query, []exprtype.Diagnostic, error) {
 		Row:      in.Row,
 		Engine:   in.Engine,
 	}, diags, nil
+}
+
+// imports collects the packages the query's types need. exprtype carries only type names, so
+// the paths have to travel beside them.
+func imports(in Input) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(p string) {
+		if p == "" || seen[p] {
+			return
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	for _, p := range in.Params {
+		add(p.Import)
+	}
+	for _, c := range in.Row {
+		add(c.Import)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func restoreParams(ps []Param) []placeholder.Param {

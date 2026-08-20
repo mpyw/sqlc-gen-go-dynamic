@@ -2,6 +2,16 @@
 //
 // The table is deliberately small and refuses what it does not know. A wrong type here is a
 // wrong type in someone's generated code, and guessing produces one that compiles.
+//
+// The mapping also depends on the driver, because some types have no standard Go
+// counterpart: PostgreSQL's numeric arrives as a decimal string over the wire and pgx scans
+// it into pgtype.Numeric, while database/sql has nothing to offer for it, so it is refused
+// there rather than aimed at a string that may not scan.
+//
+// These are not sqlc's own Go codegen's types. That codegen represents a nullable column as
+// sql.NullString or pgtype.Text where this uses a pointer, which scans correctly under both
+// drivers but is not the same API. Parity belongs to the fork that takes over its type
+// table, not to a second table written from guesses.
 package gotype
 
 import "fmt"
@@ -31,7 +41,6 @@ var postgres = map[string]Type{
 	"bigserial":   {Name: "int64"},
 	"float4":      {Name: "float32"},
 	"float8":      {Name: "float64"},
-	"numeric":     {Name: "string"},
 	"bytea":       {Name: "[]byte"},
 	"json":        {Name: "[]byte"},
 	"jsonb":       {Name: "[]byte"},
@@ -64,7 +73,6 @@ var mysql = map[string]Type{
 	"bigint":    {Name: "int64"},
 	"float":     {Name: "float32"},
 	"double":    {Name: "float64"},
-	"decimal":   {Name: "string"},
 	"blob":      {Name: "[]byte"},
 	"json":      {Name: "[]byte"},
 	"bool":      {Name: "bool"},
@@ -84,9 +92,20 @@ var sqlite = map[string]Type{
 	"datetime": {Name: "time.Time", Import: "time"},
 }
 
-// For resolves a catalog type name for an engine. A pg_catalog-qualified name arrives with
-// its schema attached; the schema carries no information the table needs.
-func For(engine, name string, isArray bool, arrayDims int) (Type, error) {
+// pgxOverlay is what pgx maps differently, or maps at all. pgtype is pgx's own, so nothing
+// here is a guess about whether it scans.
+var pgxOverlay = map[string]Type{
+	"numeric":  {Name: "pgtype.Numeric", Import: pgtypeImport},
+	"interval": {Name: "pgtype.Interval", Import: pgtypeImport},
+	"inet":     {Name: "netip.Addr", Import: "net/netip"},
+	"cidr":     {Name: "netip.Prefix", Import: "net/netip"},
+}
+
+const pgtypeImport = "github.com/jackc/pgx/v5/pgtype"
+
+// For resolves a catalog type name for an engine and driver. A pg_catalog-qualified name
+// arrives with its schema attached; the schema carries no information the table needs.
+func For(engine, sqlPackage, name string, isArray bool, arrayDims int) (Type, error) {
 	table, ok := map[string]map[string]Type{
 		"postgresql": postgres,
 		"mysql":      mysql,
@@ -95,9 +114,16 @@ func For(engine, name string, isArray bool, arrayDims int) (Type, error) {
 	if !ok {
 		return Type{}, fmt.Errorf("gotype: unsupported engine %q", engine)
 	}
-	t, ok := table[unqualify(name)]
+	bare := unqualify(name)
+	t, ok := table[bare]
+	if pgx(sqlPackage) {
+		if over, has := pgxOverlay[bare]; has {
+			t, ok = over, true
+		}
+	}
 	if !ok {
-		return Type{}, fmt.Errorf("gotype: %s has no mapping for %q", engine, name)
+		return Type{}, fmt.Errorf("gotype: %s with %s has no mapping for %q",
+			engine, driverName(sqlPackage), name)
 	}
 	if isArray {
 		if arrayDims < 1 {
@@ -108,6 +134,17 @@ func For(engine, name string, isArray bool, arrayDims int) (Type, error) {
 		}
 	}
 	return t, nil
+}
+
+func pgx(sqlPackage string) bool {
+	return sqlPackage == "pgx/v5" || sqlPackage == "pgx/v4"
+}
+
+func driverName(sqlPackage string) string {
+	if sqlPackage == "" {
+		return "database/sql"
+	}
+	return sqlPackage
 }
 
 // unqualify drops a leading schema, so pg_catalog.int8 reads as int8.

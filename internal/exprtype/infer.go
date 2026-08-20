@@ -4,39 +4,17 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/expr-lang/expr/ast"
+	exprast "github.com/expr-lang/expr/ast"
 	"github.com/expr-lang/expr/parser"
+
+	"github.com/mpyw/sqlc-gen-go-dynamic/internal/sqltmpl/ast"
 )
-
-// DirKind distinguishes the directive nodes that matter to typing.
-type DirKind uint8
-
-const (
-	Root DirKind = iota
-	If
-	ElseIf
-	Else
-	For
-)
-
-// Node is one directive in the template's structure, as the plugin would rebuild
-// it from Query.text. Binds are the sqlc parameter names bound directly in this
-// node's own body, not in a child's.
-type Node struct {
-	Kind     DirKind
-	Cond     string // If / ElseIf: the condition expression
-	Iter     string // For: the iterable expression
-	Var      string // For: the loop variable
-	Binds    []string
-	Children []*Node
-}
 
 // SQLParam is one entry of sqlc's parameter table, already mapped to a Go type.
 type SQLParam struct {
 	Name    string // sqlc's column name: "status", or "c.name" from sqlc.arg('c.name')
 	GoType  string // "string", "int64", "time.Time", ...
 	NotNull bool   // false for sqlc.narg() and for a nullable column alike
-	Slice   bool   // is_sqlc_slice: the bind expands to an IN list
 }
 
 // Diagnostic is something codegen must not silently guess about.
@@ -60,38 +38,41 @@ type inferrer struct {
 	diags   []Diagnostic
 }
 
-// Infer walks the directive tree and returns the params struct type together with
-// everything it could not decide.
-func Infer(root *Node, params []SQLParam) (*Type, []Diagnostic) {
+// Infer walks a template tree and returns the params struct type together with everything it
+// could not decide.
+func Infer(nodes []ast.Node, params []SQLParam) (*Type, []Diagnostic) {
 	in := &inferrer{root: newStruct(), params: map[string]SQLParam{}}
 	for _, p := range params {
 		in.params[normalize(p.Name)] = p
 	}
-	in.walk(root)
+	in.nodes(nodes)
 	in.settleAliases()
 	in.checkUndecided(in.root, "")
 	return in.root, in.diags
 }
 
-func (in *inferrer) walk(n *Node) {
-	switch n.Kind {
-	case If, ElseIf:
-		in.condition(n.Cond)
-	case For:
-		in.loop(n)
-		return // loop() recurses with the scope pushed
-	}
-	in.binds(n.Binds)
-	for _, c := range n.Children {
-		in.walk(c)
+func (in *inferrer) nodes(ns []ast.Node) {
+	for _, n := range ns {
+		switch n := n.(type) {
+		case ast.Bind:
+			in.bind(n)
+		case ast.If:
+			for _, arm := range n.Arms {
+				if arm.Cond != "" {
+					in.condition(arm.Cond)
+				}
+				in.nodes(arm.Body)
+			}
+		case ast.For:
+			in.loop(n)
+		}
 	}
 }
 
-// loop resolves the iterable to a slice, binds the loop variable to its element
-// type for the duration of the body, and recurses. The iterable is resolved before
-// the loop variable is pushed, so a `for a in a.ys` nested inside `for a in xs`
-// reads the outer a.
-func (in *inferrer) loop(n *Node) {
+// loop resolves the iterable to a slice and binds the loop variable to its element type for
+// the duration of the body. The iterable is resolved before the variable is pushed, so a
+// `for a in a.ys` nested inside `for a in xs` reads the outer a.
+func (in *inferrer) loop(n ast.For) {
 	p := in.resolveExpr(n.Iter)
 	if !p.ok {
 		return
@@ -99,46 +80,38 @@ func (in *inferrer) loop(n *Node) {
 	in.unify(p.typ, Slice, "/*%for*/ iterable", p.path)
 	in.scope = append(in.scope, scopeEntry{name: n.Var, elem: p.typ.elem()})
 	defer func() { in.scope = in.scope[:len(in.scope)-1] }()
-
-	in.binds(n.Binds)
-	for _, c := range n.Children {
-		in.walk(c)
-	}
+	in.nodes(n.Body)
 }
 
-// binds applies sqlc's authoritative types to the paths named by bind directives.
-func (in *inferrer) binds(names []string) {
-	for _, name := range names {
-		p, ok := in.params[normalize(name)]
-		if !ok {
-			in.diags = append(in.diags, Diagnostic{Path: name, Msg: "no sqlc parameter of this name"})
-			continue
-		}
-		t := in.resolvePath(strings.Split(name, "."))
-		target := t
-		if p.Slice {
-			in.unify(t, Slice, "sqlc.slice()", name)
-			target = t.elem()
-		}
-		in.unify(target, kindOfGoType(p.GoType), "sqlc parameter", name)
-		target.GoType = p.GoType
-
-		// Follow sqlc verbatim on nullability. NotNull is false for both
-		// sqlc.narg('x') and a plain sqlc.arg('x') compared against a nullable
-		// column — the request does not distinguish them — and there is no need to:
-		// emitting a nullable Go type for either is what sqlc's own Go codegen does,
-		// so existing queries keep the types their authors already expect, and
-		// sqlc.narg stays the way to ask for one deliberately.
-		if !p.NotNull {
-			target.Optional = true
-		}
-
-		// Sitting inside /*%if*/ or /*%for*/ is deliberately *not* a source of
-		// optionality: when the branch does not render, nothing reads the value, so
-		// the zero value is a fine stand-in and a pointer buys nothing. What does
-		// force one is a nil test in a condition (recorded by markOptional), where
-		// unset and zero must be distinguishable or the branch decision is wrong.
+// bind applies sqlc's authoritative type to the path a marker names. Whether the bind
+// expands to a list comes from the marker, since that is what renders.
+func (in *inferrer) bind(n ast.Bind) {
+	p, ok := in.params[normalize(n.Name)]
+	if !ok {
+		in.diags = append(in.diags, Diagnostic{Path: n.Name, Msg: "no sqlc parameter of this name"})
+		return
 	}
+	t := in.resolvePath(strings.Split(n.Name, "."))
+	target := t
+	if n.List {
+		in.unify(t, Slice, "sqlc.slice()", n.Name)
+		target = t.elem()
+	}
+	in.unify(target, kindOfGoType(p.GoType), "sqlc parameter", n.Name)
+	target.GoType = p.GoType
+
+	// Follow sqlc verbatim on nullability. NotNull is false for both sqlc.narg('x') and a
+	// plain sqlc.arg('x') against a nullable column — the request does not distinguish them
+	// — and there is no need to: a nullable Go type for either is what sqlc's own Go codegen
+	// emits, so existing queries keep the types their authors expect.
+	if !p.NotNull {
+		target.Optional = true
+	}
+
+	// Sitting inside /*%if*/ or /*%for*/ is deliberately not a source of optionality: when
+	// the branch does not render, nothing reads the value, so the zero value is a fine
+	// stand-in. What does force a pointer is a nil test in a condition, where unset and zero
+	// must be distinguishable or the branch decision itself is wrong.
 }
 
 // condition infers types for the variables of a directive condition, which is
@@ -162,21 +135,21 @@ type place struct {
 
 // visit infers the type of node given the kind the surrounding expression expects
 // of it, recording what it learns about any variable it reaches.
-func (in *inferrer) visit(n ast.Node, want Kind, src string) Kind {
+func (in *inferrer) visit(n exprast.Node, want Kind, src string) Kind {
 	switch n := n.(type) {
-	case *ast.NilNode:
+	case *exprast.NilNode:
 		return Unknown
 
-	case *ast.BoolNode:
+	case *exprast.BoolNode:
 		return Bool
-	case *ast.StringNode:
+	case *exprast.StringNode:
 		return String
-	case *ast.IntegerNode:
+	case *exprast.IntegerNode:
 		return Int
-	case *ast.FloatNode:
+	case *exprast.FloatNode:
 		return Float
 
-	case *ast.IdentifierNode, *ast.MemberNode:
+	case *exprast.IdentifierNode, *exprast.MemberNode:
 		if isNil(n) {
 			return Unknown
 		}
@@ -187,10 +160,10 @@ func (in *inferrer) visit(n ast.Node, want Kind, src string) Kind {
 		in.unify(p.typ, want, "condition expression", p.path)
 		return p.typ.Kind
 
-	case *ast.ChainNode: // a?.b
+	case *exprast.ChainNode: // a?.b
 		return in.visit(n.Node, want, src)
 
-	case *ast.UnaryNode:
+	case *exprast.UnaryNode:
 		switch n.Operator {
 		case "!", "not":
 			in.visit(n.Node, Bool, src)
@@ -207,33 +180,33 @@ func (in *inferrer) visit(n ast.Node, want Kind, src string) Kind {
 		}
 		return Unknown
 
-	case *ast.BinaryNode:
+	case *exprast.BinaryNode:
 		return in.binary(n, src)
 
-	case *ast.BuiltinNode:
+	case *exprast.BuiltinNode:
 		return in.builtin(n, src)
 
-	case *ast.ConditionalNode:
+	case *exprast.ConditionalNode:
 		in.visit(n.Cond, Bool, src)
 		k := in.visit(n.Exp1, want, src)
 		in.visit(n.Exp2, want, src)
 		return k
 
-	case *ast.ArrayNode:
+	case *exprast.ArrayNode:
 		for _, e := range n.Nodes {
 			in.visit(e, Unknown, src)
 		}
 		return Slice
 
-	case *ast.PredicateNode:
+	case *exprast.PredicateNode:
 		in.visit(n.Node, Bool, src)
 		return Bool
 
-	case *ast.PointerNode:
+	case *exprast.PointerNode:
 		// The "#" of a predicate: bound by the enclosing builtin, not a variable.
 		return Unknown
 
-	case *ast.CallNode:
+	case *exprast.CallNode:
 		// A generated params struct contributes fields, never functions or methods —
 		// bisql's scope is built from exported fields — so there is nothing here that
 		// could be called. Type the arguments, which may well be inferable, and
@@ -256,7 +229,7 @@ func (in *inferrer) visit(n ast.Node, want Kind, src string) Kind {
 // can simply be tabulated. The distinction that matters is whether a builtin pins
 // its argument's type or merely constrains it: len() accepts strings, slices and
 // maps alike, while all() and its relatives fail on anything but a slice.
-func (in *inferrer) builtin(n *ast.BuiltinNode, src string) Kind {
+func (in *inferrer) builtin(n *exprast.BuiltinNode, src string) Kind {
 	var (
 		arg0Kind   = Unknown
 		arg0Constr Constraint
@@ -294,7 +267,7 @@ func (in *inferrer) builtin(n *ast.BuiltinNode, src string) Kind {
 	return result
 }
 
-func (in *inferrer) binary(n *ast.BinaryNode, src string) Kind {
+func (in *inferrer) binary(n *exprast.BinaryNode, src string) Kind {
 	switch n.Operator {
 	case "&&", "||", "and", "or":
 		in.visit(n.Left, Bool, src)
@@ -326,7 +299,7 @@ func (in *inferrer) binary(n *ast.BinaryNode, src string) Kind {
 
 	case "in", "not in":
 		// A literal set on the right tells us the element shape outright.
-		if arr, ok := n.Right.(*ast.ArrayNode); ok && len(arr.Nodes) > 0 {
+		if arr, ok := n.Right.(*exprast.ArrayNode); ok && len(arr.Nodes) > 0 {
 			if k := literalKind(arr.Nodes[0]); k != Unknown {
 				in.visit(n.Left, k, src)
 				return Bool
@@ -358,7 +331,7 @@ func (in *inferrer) binary(n *ast.BinaryNode, src string) Kind {
 // literal on either side fixes the shape for both; two variables only prove that
 // they agree, which is recorded so that whichever one is resolved elsewhere
 // resolves the other too.
-func (in *inferrer) compare(left, right ast.Node, src string) {
+func (in *inferrer) compare(left, right exprast.Node, src string) {
 	lk, rk := literalKind(left), literalKind(right)
 	switch {
 	case lk != Unknown:
@@ -380,7 +353,7 @@ func (in *inferrer) compare(left, right ast.Node, src string) {
 
 // constrain records a fact about an expression's variable that narrows it without
 // determining a Go type.
-func (in *inferrer) constrain(n ast.Node, c Constraint, src string) {
+func (in *inferrer) constrain(n exprast.Node, c Constraint, src string) {
 	if p := in.resolveNode(n, src); p.ok {
 		p.typ.Constraints |= c
 	}
@@ -419,7 +392,7 @@ func copyKnown(src, dst *Type) bool {
 }
 
 // markOptional records that a place may be absent, without constraining its shape.
-func (in *inferrer) markOptional(n ast.Node, src string) {
+func (in *inferrer) markOptional(n exprast.Node, src string) {
 	if p := in.resolveNode(n, src); p.ok {
 		p.typ.Optional = true
 	}
@@ -428,22 +401,22 @@ func (in *inferrer) markOptional(n ast.Node, src string) {
 // literalKind reports the type a literal pins, unwrapping a leading sign so that
 // -1 reads as an integer rather than as an operation. expr's parser emits exactly
 // four literal shapes, so these are the only types a literal can ever pin.
-func literalKind(n ast.Node) Kind {
-	if u, ok := n.(*ast.UnaryNode); ok && (u.Operator == "-" || u.Operator == "+") {
+func literalKind(n exprast.Node) Kind {
+	if u, ok := n.(*exprast.UnaryNode); ok && (u.Operator == "-" || u.Operator == "+") {
 		switch u.Node.(type) {
-		case *ast.IntegerNode, *ast.FloatNode:
+		case *exprast.IntegerNode, *exprast.FloatNode:
 			return literalKind(u.Node)
 		}
 		return Unknown
 	}
 	switch n.(type) {
-	case *ast.StringNode:
+	case *exprast.StringNode:
 		return String
-	case *ast.IntegerNode:
+	case *exprast.IntegerNode:
 		return Int
-	case *ast.FloatNode:
+	case *exprast.FloatNode:
 		return Float
-	case *ast.BoolNode:
+	case *exprast.BoolNode:
 		return Bool
 	}
 	return Unknown
@@ -453,11 +426,11 @@ func literalKind(n ast.Node) Kind {
 // but also accepts Komapper's "null", which reaches the parser as an ordinary
 // identifier that resolves to nil at evaluation time; inference must read it the
 // same way rather than mistaking it for a variable.
-func isNil(n ast.Node) bool {
+func isNil(n exprast.Node) bool {
 	switch n := n.(type) {
-	case *ast.NilNode:
+	case *exprast.NilNode:
 		return true
-	case *ast.IdentifierNode:
+	case *exprast.IdentifierNode:
 		return n.Value == "null"
 	}
 	return false
@@ -466,15 +439,15 @@ func isNil(n ast.Node) bool {
 // resolveNode resolves an expression that denotes a place: a variable, a field of
 // one, or an element of one. Anything else is not a place, and is left alone
 // rather than guessed at.
-func (in *inferrer) resolveNode(n ast.Node, src string) place {
+func (in *inferrer) resolveNode(n exprast.Node, src string) place {
 	switch n := n.(type) {
-	case *ast.IdentifierNode:
+	case *exprast.IdentifierNode:
 		return place{typ: in.rootOf(n.Value), path: n.Value, ok: true}
 
-	case *ast.ChainNode:
+	case *exprast.ChainNode:
 		return in.resolveNode(n.Node, src)
 
-	case *ast.MemberNode:
+	case *exprast.MemberNode:
 		base := in.resolveNode(n.Node, src)
 		if !base.ok {
 			return base
@@ -482,7 +455,7 @@ func (in *inferrer) resolveNode(n ast.Node, src string) place {
 		if n.Optional {
 			base.typ.Optional = true
 		}
-		if prop, ok := n.Property.(*ast.StringNode); ok {
+		if prop, ok := n.Property.(*exprast.StringNode); ok {
 			return place{typ: base.typ.field(prop.Value), path: base.path + "." + prop.Value, ok: true}
 		}
 		// Indexing. An integer index means a slice; a computed or string index could

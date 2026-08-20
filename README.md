@@ -89,24 +89,23 @@ shared core earns its keep.
 
 | | |
 |---|---|
-| `internal/bind` | Recognizes sqlc's parameter markers, mirroring sqlc exactly — including that the `@name` shortcut does not exist for MySQL. |
-| `internal/sqltmpl` | The engine: `token`, `ast`, `lexer`, `parser`, `render`. Emits text verbatim, evaluates directives, numbers placeholders off one counter. |
-| `internal/dialect` | Placeholder generation for the three engines sqlc supports. |
+| `internal/query` | The pipeline: one query from sqlc's request becomes a canonical template, a tree, and typed parameters. |
+| `internal/placeholder` | Restores the markers sqlc replaced, which yields that canonical template. |
+| `internal/bind` | Recognizes sqlc's markers, mirroring sqlc exactly — including that `@name` does not exist for MySQL. |
+| `internal/sqltmpl` | The engine: `scan`, `token`, `ast`, `lexer`, `parser`, `render`. |
+| `internal/exprtype` | Types the variables that appear only in conditions, and refuses — with a reason — the ones it cannot. |
 | `internal/exprlang` | The expression evaluator, for conditions and iterables only. A marker is a name, not an expression. |
-| `internal/exprtype` | Infers Go types for the variables that appear only in directive conditions, and refuses — with a reason — the ones it cannot. |
-| `internal/directive` | Recovers the directive tree from `Query.text` and pairs each placeholder with sqlc's parameter name. To be folded into `internal/sqltmpl`: see below. |
+| `internal/dialect` | Placeholder generation for the three engines sqlc supports. |
+| `internal/lint` | The mistakes sqlc accepts and this cannot. |
 | _(not written)_ | The codegen and the plugin entry point. |
 
-### One parser, both sides
+### One text, one parser
 
-`internal/directive` and `internal/sqltmpl/parser` currently read the same directive syntax
-twice — once at build time over `Query.text`, once at run time over the template. That is
-duplication with a failure mode: the two could disagree about what a template means.
-
-They collapse into one. `Query.text` differs from the canonical template only in that sqlc
-has replaced each marker with a placeholder, so restoring the names — a text edit driven by
-the parameter table — yields a template that the run-time parser reads directly, and that is
-also the text worth embedding. Typing then walks the same tree the renderer will.
+`Query.text` differs from the template only in that sqlc has replaced each marker with a
+placeholder. Restoring the names — a text edit driven by the parameter table — yields the
+canonical template: the text the generated code embeds, the text the renderer reads, and the
+text typing walks. Build time and run time therefore cannot disagree about what a template
+means.
 
 ```
 Query.text + params ──restore──▶ template ──parse──▶ AST ──▶ typing (build time)
@@ -114,8 +113,9 @@ Query.text + params ──restore──▶ template ──parse──▶ AST ─
                                      └── embedded in the generated code
 ```
 
-Restoring is also the step that makes the placeholder styles a local concern rather than a
-runtime one: `$n` for PostgreSQL, a bare `?` for MySQL, `?n` for SQLite.
+Restoring is also what keeps the placeholder spellings a local concern rather than a runtime
+one: `$n` for PostgreSQL, a bare `?` for MySQL, `?n` for SQLite. The renderer numbers its own
+placeholders and never sees sqlc's.
 
 ### `@include` is not here, and cannot be
 

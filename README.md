@@ -197,6 +197,11 @@ rewritten in the files that import it, and the tree is `gofmt`-clean where upstr
 its import blocks are out of order. The resolution for both is to take upstream's version and
 re-apply, which `gofmt -w .` and one `sed` do.
 
+Upstream's files are also excluded from `golangci-lint`, in `.golangci.yml`. sqlc-gen-go does
+not run it, and satisfying it here would put a diff in every file upstream is most likely to
+change. A new upstream file fails lint until it is listed, which is the signal that it needs
+adding.
+
 ## What running real sqlc found
 
 Every one of these was a measurement, not a deduction.

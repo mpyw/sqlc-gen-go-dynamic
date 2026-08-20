@@ -1,0 +1,37 @@
+version: "2"
+
+# Upstream's files are carried unmodified so that a sync is a merge, which means they are not
+# linted: sqlc-gen-go does not run golangci-lint, and satisfying it here would put a diff in
+# every file upstream is most likely to change. What this project maintains is linted.
+#
+# A new upstream file therefore fails lint until it is listed, which is the intended signal.
+linters:
+  exclusions:
+    paths:
+      - internal/debug/debug\.go$
+      - internal/driver\.go$
+      - internal/endtoend/testdata/authors/go/db\.go$
+      - internal/endtoend/testdata/authors/go/models\.go$
+      - internal/endtoend/testdata/authors/go/query\.sql\.go$
+      - internal/enum\.go$
+      - internal/field\.go$
+      - internal/gen\.go$
+      - internal/go_type\.go$
+      - internal/imports\.go$
+      - internal/inflection/singular\.go$
+      - internal/mysql_type\.go$
+      - internal/opts/enum\.go$
+      - internal/opts/go_type\.go$
+      - internal/opts/options\.go$
+      - internal/opts/override\.go$
+      - internal/opts/override_test\.go$
+      - internal/opts/shim\.go$
+      - internal/postgresql_type\.go$
+      - internal/query\.go$
+      - internal/reserved\.go$
+      - internal/result\.go$
+      - internal/result_test\.go$
+      - internal/sqlite_type\.go$
+      - internal/struct\.go$
+      - internal/template\.go$
+      - plugin/main\.go$

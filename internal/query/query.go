@@ -30,6 +30,15 @@ type Param struct {
 	Nullable bool // written as sqlc.narg; indistinguishable from a nullable column in the request
 }
 
+// Column is one result column. Embed names a table when the column stands for the whole of
+// it, which is what sqlc.embed reports; sqlc has already expanded the call into the column
+// list by then, so the name is all that is left of it.
+type Column struct {
+	Name   string
+	GoType string
+	Embed  string
+}
+
 // Input is one query as sqlc reports it.
 type Input struct {
 	Name     string   // Query.name
@@ -38,6 +47,7 @@ type Input struct {
 	Comments []string // Query.comments
 	Engine   string   // settings.engine
 	Params   []Param
+	Row      []Column
 }
 
 // Query is a prepared query.
@@ -47,6 +57,8 @@ type Query struct {
 	Template string     // canonical: markers restored, ready to embed and to render
 	Nodes    []ast.Node // parsed once, for both typing and rendering
 	Params   *exprtype.Type
+	Row      []Column
+	Engine   string
 }
 
 // Prepare validates and prepares a query. Diagnostics from typing are returned alongside the
@@ -69,7 +81,15 @@ func Prepare(in Input) (*Query, []exprtype.Diagnostic, error) {
 	}
 	params, diags := exprtype.Infer(nodes, typeParams(in.Params))
 	exprtype.NameQuery(params, in.Name)
-	return &Query{Name: in.Name, Cmd: in.Cmd, Template: tmpl, Nodes: nodes, Params: params}, diags, nil
+	return &Query{
+		Name:     in.Name,
+		Cmd:      in.Cmd,
+		Template: tmpl,
+		Nodes:    nodes,
+		Params:   params,
+		Row:      in.Row,
+		Engine:   in.Engine,
+	}, diags, nil
 }
 
 func restoreParams(ps []Param) []placeholder.Param {

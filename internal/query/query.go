@@ -34,9 +34,10 @@ type Param struct {
 // it, which is what sqlc.embed reports; sqlc has already expanded the call into the column
 // list by then, so the name is all that is left of it.
 type Column struct {
-	Name   string
-	GoType string
-	Embed  string
+	Name    string
+	GoType  string
+	NotNull bool
+	Embed   string
 }
 
 // Input is one query as sqlc reports it.

@@ -107,10 +107,16 @@ func shapeOf(cmd string) (shape, error) {
 	return shape{}, fmt.Errorf("unsupported command %q", cmd)
 }
 
+// emitRow declares the row type. A nullable column takes a pointer, since scanning NULL into
+// a value fails at run time and nothing earlier would have caught it.
 func emitRow(b *strings.Builder, q *query.Query) {
 	fmt.Fprintf(b, "\ntype %sRow struct {\n", q.Name)
 	for _, c := range q.Row {
-		fmt.Fprintf(b, "\t%s %s\n", exprtype.GoName(c.Name), c.GoType)
+		t := c.GoType
+		if !c.NotNull && !strings.HasPrefix(t, "[]") {
+			t = "*" + t
+		}
+		fmt.Fprintf(b, "\t%s %s\n", exprtype.GoName(c.Name), t)
 	}
 	b.WriteString("}\n")
 }

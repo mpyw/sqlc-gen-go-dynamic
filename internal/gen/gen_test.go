@@ -35,8 +35,8 @@ func searchUsers() query.Input {
 			{Number: 3, Name: "c.name", GoType: "string", NotNull: true},
 		},
 		Row: []query.Column{
-			{Name: "id", GoType: "int64"},
-			{Name: "name", GoType: "string"},
+			{Name: "id", GoType: "int64", NotNull: true},
+			{Name: "name", GoType: "string", NotNull: true},
 		},
 	}
 }
@@ -92,7 +92,7 @@ func TestFileShapes(t *testing.T) {
 				Name: "Q", Cmd: c.cmd, Engine: "postgresql",
 				Text:   "select id from t where a = $1 /*%if x*/ and b = 1 /*%end*/",
 				Params: []query.Param{{Number: 1, Name: "a", GoType: "int64", NotNull: true}},
-				Row:    []query.Column{{Name: "id", GoType: "int64"}},
+				Row:    []query.Column{{Name: "id", GoType: "int64", NotNull: true}},
 			}
 			out, err := gen.File(gen.Options{Package: "db"}, []*query.Query{prepare(t, in)})
 			if err != nil {
@@ -111,7 +111,7 @@ func TestFileRejects(t *testing.T) {
 			Name: "Q", Cmd: ":many", Engine: "postgresql",
 			Text:   "select id from t where a = $1 /*%if x*/ and b = 1 /*%end*/",
 			Params: []query.Param{{Number: 1, Name: "a", GoType: "int64", NotNull: true}},
-			Row:    []query.Column{{Name: "id", GoType: "int64"}},
+			Row:    []query.Column{{Name: "id", GoType: "int64", NotNull: true}},
 		}
 	}
 	t.Run("an unsupported command", func(t *testing.T) {

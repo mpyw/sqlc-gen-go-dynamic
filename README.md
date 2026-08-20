@@ -3,10 +3,10 @@
 A [sqlc](https://sqlc.dev) codegen plugin that gives sqlc queries `/*%if*/` and
 `/*%for*/`, so a query with branches keeps sqlc's type safety instead of losing it.
 
-**Status: v0, exploratory.** It generates code, and the generated code compiles and runs —
-see [`testdata/example`](testdata/example), a separate module so the go tool builds and
-executes it rather than a test only comparing text. What is missing is the plugin entry
-point, so nothing is wired to sqlc yet.
+**Status: v0, exploratory.** It works end to end: sqlc invokes it, it generates Go, and the
+Go compiles and runs. What is missing is everything around the queries — the `DBTX`
+interface, `Queries`, and the models are still sqlc's own Go codegen's job — plus
+`sqlc.embed`, which is refused rather than guessed at.
 
 ## The problem
 
@@ -101,8 +101,10 @@ shared core earns its keep.
 | `internal/dialect` | Placeholder generation for the three engines sqlc supports. |
 | `internal/lint` | The mistakes sqlc accepts and this cannot. |
 | `internal/gen` | Emits the Go source: the template constant, the parameter and row types, the method. |
+| `internal/gotype` | Maps a catalog type onto a Go type, and refuses what it does not know. |
+| `internal/plugin` | sqlc's process-plugin protocol, over JSON. |
 | `dyn` | The runtime the generated code calls. The only public package. |
-| _(not written)_ | The plugin entry point, and the surrounding package sqlc's own Go codegen emits. |
+| _(not written)_ | The surrounding package sqlc's own Go codegen emits, and `sqlc.embed`. |
 
 ### One text, one parser
 
@@ -254,6 +256,32 @@ generator knows both sides: a condition writes `minAge` where the marker beside 
 distinguishable from zero or the branch decision is wrong. `ActiveOnly` and `Status` are
 values even though both sit inside branches: when a branch does not render, nothing reads the
 value.
+
+## Wiring it up
+
+The plugin speaks sqlc's process protocol in its JSON encoding, so it needs no protobuf
+dependency — and needs `format: json` to be asked for:
+
+```yaml
+version: "2"
+plugins:
+  - name: dynamic
+    process:
+      cmd: sqlc-gen-go-dynamic
+      format: json
+sql:
+  - engine: postgresql
+    schema: schema.sql
+    queries: query.sql
+    codegen:
+      - plugin: dynamic
+        out: gen
+        options:
+          package: db
+          filename: queries.gen.go
+```
+
+A WASM build would need the generated protobuf types, since that transport is protobuf only.
 
 ## Development
 

@@ -1,0 +1,57 @@
+[tools]
+go = "1.25.3"
+golangci-lint = "2.12.2"
+"go:golang.org/x/tools/cmd/deadcode" = "latest"
+
+[tasks.fmt]
+description = "Check formatting (gofmt)"
+run = '''
+files=$(gofmt -l .)
+if [ -n "$files" ]; then echo "gofmt needed on:"; echo "$files"; exit 1; fi
+'''
+
+[tasks.build]
+description = "Build all packages"
+run = 'go build ./...'
+
+[tasks.vet]
+description = "go vet"
+run = 'go vet ./...'
+
+[tasks.lint]
+description = "golangci-lint"
+run = 'golangci-lint run ./...'
+
+# Informational only: upstream reaches several functions through templates, which deadcode
+# cannot see, so it reports them and always will.
+[tasks.deadcode]
+description = "Report unreachable functions (reachability via tests)"
+run = 'deadcode -test ./...'
+
+[tasks.test]
+description = "Run tests with the race detector"
+run = 'go test -race ./...'
+
+[tasks.cover]
+description = "Write a holistic coverage profile (coverage.out)"
+run = 'go test -coverpkg=./... -covermode=atomic -coverprofile=coverage.out ./...'
+
+# The example is a separate module (testdata/example, joined via go.work) so that the
+# generated file is compiled and run by the go tool rather than only compared as text.
+# Real sqlc, real generation, real compilation. Slow (it fetches sqlc, which needs cgo), so it
+# is its own task rather than part of the gate.
+[tasks.sqlc]
+description = "Generate with real sqlc and compile the result"
+run = './testdata/sqlc/run.sh'
+
+[tasks.wasm]
+description = "Build the plugin for both transports"
+run = '''
+mkdir -p bin
+go build -o bin/sqlc-gen-go-dynamic ./plugin
+GOOS=wasip1 GOARCH=wasm go build -o bin/sqlc-gen-go-dynamic.wasm ./plugin
+'''
+
+[tasks.check]
+description = "Full gate: fmt, build, vet, test"
+depends = ["fmt", "build", "vet", "test"]

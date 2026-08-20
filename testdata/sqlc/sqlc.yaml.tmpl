@@ -1,0 +1,15 @@
+version: "2"
+plugins:
+  - name: dynamic
+    process:
+      cmd: "@PLUGIN@"
+sql:
+  - engine: postgresql
+    schema: schema.sql
+    queries: query.sql
+    codegen:
+      - plugin: dynamic
+        out: gen
+        options:
+          package: gen
+          sql_package: pgx/v5

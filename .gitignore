@@ -1,1 +1,6 @@
 /bin/
+/coverage.out
+bin/
+*.wasm
+/.idea/
+.DS_Store

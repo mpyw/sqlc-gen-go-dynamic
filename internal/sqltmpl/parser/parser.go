@@ -23,6 +23,25 @@ func Parse(src string, rules bind.Rules) ([]ast.Node, error) {
 	return nodes, nil
 }
 
+// HasDirective reports whether src contains a directive, as the lexer sees it: a /*%…*/ inside
+// a string literal or a comment is text, and a caller that decides by substring would treat
+// such a query as dynamic and expose it to failures it should never have met.
+func HasDirective(src string, rules bind.Rules) (bool, error) {
+	lex := lexer.New(src, rules)
+	for {
+		tok, err := lex.Next()
+		if err != nil {
+			return false, err
+		}
+		switch tok.Kind {
+		case token.EOF:
+			return false, nil
+		case token.If, token.Elseif, token.Else, token.For, token.End:
+			return true, nil
+		}
+	}
+}
+
 // frame is an open block: a conditional collecting arms, or a loop collecting one body.
 type frame struct {
 	isFor bool

@@ -35,7 +35,7 @@ func Render(nodes []ast.Node, params any, d dialect.Dialect, ev Evaluator) (Resu
 	if err != nil {
 		return Result{}, err
 	}
-	r := &renderer{d: d, ev: ev}
+	r := &renderer{d: d, ev: ev, elems: map[string]any{}}
 	if err := r.nodes(nodes, sc); err != nil {
 		return Result{}, err
 	}
@@ -43,10 +43,14 @@ func Render(nodes []ast.Node, params any, d dialect.Dialect, ev Evaluator) (Resu
 }
 
 type renderer struct {
-	d    dialect.Dialect
-	ev   Evaluator
-	sql  strings.Builder
-	args []any
+	d   dialect.Dialect
+	ev  Evaluator
+	sql strings.Builder
+	// elems holds each loop variable's element as it was. The scope holds a converted copy
+	// so that a condition can read the element's fields, which the expression language
+	// resolves by exact name; a bind of the element as a whole has to get the value back.
+	elems map[string]any
+	args  []any
 }
 
 func (r *renderer) nodes(ns []ast.Node, sc Scope) error {
@@ -77,7 +81,7 @@ func (r *renderer) node(n ast.Node, sc Scope) error {
 // name, so it needs no evaluator, and resolving it here keeps the folded-name rules in one
 // place.
 func (r *renderer) bind(n ast.Bind, sc Scope) error {
-	v, ok := lookup(sc, n.Name)
+	v, ok := r.resolve(sc, n.Name)
 	if !ok {
 		return fmt.Errorf("template: no value for parameter %q", n.Name)
 	}
@@ -102,6 +106,18 @@ func (r *renderer) bind(n ast.Bind, sc Scope) error {
 		r.arg(e)
 	}
 	return nil
+}
+
+// resolve reads the value a marker names. A loop variable on its own is the element itself,
+// not the scope built from it: converting is for the expression language's benefit, and a bind
+// of the whole element must not see the conversion.
+func (r *renderer) resolve(sc Scope, path string) (any, bool) {
+	if !strings.Contains(path, ".") {
+		if v, ok := r.elems[path]; ok {
+			return v, true
+		}
+	}
+	return lookup(sc, path)
 }
 
 func (r *renderer) conditional(n ast.If, sc Scope) error {
@@ -142,8 +158,19 @@ func (r *renderer) loop(n ast.For, sc Scope) error {
 	for k, e := range sc {
 		inner[k] = e
 	}
+	// A nested loop may reuse the name, so the outer element is restored on the way out.
+	outer, hadOuter := r.elems[n.Var]
+	defer func() {
+		if hadOuter {
+			r.elems[n.Var] = outer
+			return
+		}
+		delete(r.elems, n.Var)
+	}()
+
 	for _, e := range elems {
 		inner[n.Var] = elementScope(e)
+		r.elems[n.Var] = e
 		if err := r.nodes(n.Body, inner); err != nil {
 			return err
 		}
@@ -182,12 +209,13 @@ func iterable(v any) ([]any, bool) {
 	if v == nil {
 		return nil, false
 	}
-	if _, ok := v.([]byte); ok {
-		return nil, false
-	}
 	rv := reflect.ValueOf(v)
 	switch rv.Kind() {
 	case reflect.Slice, reflect.Array:
+		// Bytes are a value, not a list of values, whatever the slice type is named.
+		if rv.Type().Elem().Kind() == reflect.Uint8 {
+			return nil, false
+		}
 		out := make([]any, rv.Len())
 		for i := range out {
 			out[i] = rv.Index(i).Interface()

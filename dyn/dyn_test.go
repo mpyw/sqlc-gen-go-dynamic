@@ -22,10 +22,11 @@ type cond struct {
 	Status string
 }
 
+// One key per field: the runtime folds both sides, so min_age is reached by a condition
+// writing minAge.
 func (p params) TemplateScope() map[string]any {
 	return map[string]any{
 		"activeOnly": p.ActiveOnly,
-		"minAge":     p.MinAge,
 		"min_age":    p.MinAge,
 		"ids":        p.Ids,
 		"conds":      p.Conds,

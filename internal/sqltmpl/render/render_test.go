@@ -7,6 +7,7 @@ import (
 	"github.com/mpyw/sqlc-gen-go-dynamic/internal/bind"
 	"github.com/mpyw/sqlc-gen-go-dynamic/internal/dialect"
 	"github.com/mpyw/sqlc-gen-go-dynamic/internal/exprlang"
+	"github.com/mpyw/sqlc-gen-go-dynamic/internal/sqltmpl/ast"
 	"github.com/mpyw/sqlc-gen-go-dynamic/internal/sqltmpl/parser"
 	"github.com/mpyw/sqlc-gen-go-dynamic/internal/sqltmpl/render"
 )
@@ -281,4 +282,19 @@ func TestRenderNestedStructElements(t *testing.T) {
 	if want := []any{"x", "y"}; !reflect.DeepEqual(res.Args, want) {
 		t.Errorf("Args = %#v, want %#v", res.Args, want)
 	}
+}
+
+// parse and buildErr let the review tests assert on failures as well as on output.
+func parse(t *testing.T, src string) ([]ast.Node, error) {
+	t.Helper()
+	return parser.Parse(src, bind.RulesFor("postgresql"))
+}
+
+func buildErr(t *testing.T, src string, params any, d dialect.Dialect) (render.Result, error) {
+	t.Helper()
+	nodes, err := parser.Parse(src, bind.RulesFor(d.Name()))
+	if err != nil {
+		return render.Result{}, err
+	}
+	return render.Render(nodes, params, d, &exprlang.Evaluator{})
 }

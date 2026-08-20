@@ -339,6 +339,14 @@ func (i *importer) queryImports(filename string) fileImports {
 					return true
 				}
 			}
+			// A dynamic query's params struct is declared outside the Arg machinery, so its
+			// field types are invisible above. Without this the file names a type it never
+			// imports.
+			for _, t := range q.DynamicTypes {
+				if hasPrefixIgnoringSliceAndPointerPrefix(t, name) {
+					return true
+				}
+			}
 		}
 		return false
 	})

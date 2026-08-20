@@ -273,9 +273,10 @@ type Query struct {
 	// directives leaves these empty and is emitted exactly as it would be without this
 	// plugin.
 	Dynamic      bool
-	Engine       string // for the runtime to read the markers as sqlc did
-	TemplateVar  string // the package-level parsed template
-	DynamicDecls string // the params struct, its element structs, and TemplateScope
+	Engine       string   // for the runtime to read the markers as sqlc did
+	TemplateVar  string   // the package-level parsed template
+	DynamicDecls string   // the params struct, its element structs, and TemplateScope
+	DynamicTypes []string // every Go type those declarations mention
 }
 
 func (q Query) hasRetType() bool {

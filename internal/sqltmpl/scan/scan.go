@@ -7,7 +7,10 @@
 // SQL is not otherwise examined: no keyword is recognized and no grammar is applied.
 package scan
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // Cursor is a position in SQL text.
 type Cursor struct {
@@ -38,18 +41,73 @@ func (c *Cursor) AtQuote() bool {
 	return false
 }
 
+// AtDollarQuote reports whether a PostgreSQL dollar-quoted string starts at the cursor. The
+// tag between the dollars is an identifier or empty, which is what tells $$…$$ and $tag$…$tag$
+// apart from a $1 placeholder or a lone $.
+func (c *Cursor) AtDollarQuote() bool {
+	_, ok := c.dollarTag()
+	return ok
+}
+
+// dollarTag returns the opening delimiter at the cursor, "$$" or "$tag$".
+func (c *Cursor) dollarTag() (string, bool) {
+	if c.At() != '$' {
+		return "", false
+	}
+	i := c.I + 1
+	for i < len(c.Src) && isTagByte(c.Src[i], i == c.I+1) {
+		i++
+	}
+	if i >= len(c.Src) || c.Src[i] != '$' {
+		return "", false
+	}
+	return c.Src[c.I : i+1], true
+}
+
+func isTagByte(b byte, first bool) bool {
+	switch {
+	case b >= 'a' && b <= 'z', b >= 'A' && b <= 'Z', b == '_':
+		return true
+	case b >= '0' && b <= '9':
+		return !first
+	}
+	return false
+}
+
+// SkipDollarQuote consumes the dollar-quoted string at the cursor. Nothing inside one is
+// escaped, so it ends at the first repeat of its own delimiter.
+func (c *Cursor) SkipDollarQuote() error {
+	tag, ok := c.dollarTag()
+	if !ok {
+		return fmt.Errorf("not a dollar quote")
+	}
+	c.I += len(tag)
+	if j := strings.Index(c.Src[c.I:], tag); j >= 0 {
+		c.I += j + len(tag)
+		return nil
+	}
+	c.I = len(c.Src)
+	return fmt.Errorf("unterminated dollar-quoted string")
+}
+
 // AtLineComment reports whether a -- comment starts at the cursor.
 func (c *Cursor) AtLineComment() bool { return c.At() == '-' && c.Peek(1) == '-' }
 
 // AtBlockComment reports whether a /* comment starts at the cursor.
 func (c *Cursor) AtBlockComment() bool { return c.At() == '/' && c.Peek(1) == '*' }
 
-// SkipQuoted consumes the quoted span at the cursor. A quote is escaped by doubling it;
-// backslash escapes are not recognized.
+// SkipQuoted consumes the quoted span at the cursor. A quote is escaped by doubling it, and
+// also by a backslash: MySQL does that by default, and rejecting it would turn a legal query
+// into a build failure. In a dialect where a backslash is literal this reads one character
+// further than the server would, which can only extend the span, never end it early.
 func (c *Cursor) SkipQuoted() error {
 	q := c.At()
 	c.I++
 	for !c.Done() {
+		if c.At() == '\\' && c.I+1 < len(c.Src) {
+			c.I += 2
+			continue
+		}
 		if c.At() != q {
 			c.I++
 			continue

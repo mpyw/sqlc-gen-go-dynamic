@@ -17,12 +17,36 @@ type Marker struct {
 	Len  int  // bytes spanned
 }
 
-// Rules are the spellings a template may use. The @name shortcut is dialect-dependent
-// because sqlc's is: sqlc does not support it for MySQL, where @name is a user variable.
-type Rules struct{ AtForm bool }
+// Rules are the spellings a template may use, and the comment syntax the engine has. Both are
+// dialect-dependent because sqlc's reading of them is: sqlc does not support the @name shortcut
+// for MySQL, where @name is a user variable, and MySQL alone treats # as a line comment.
+type Rules struct {
+	AtForm       bool
+	HashComments bool
+}
 
-// RulesFor resolves the rules for an engine name.
-func RulesFor(engine string) Rules { return Rules{AtForm: engine != "mysql"} }
+// RulesFor resolves the rules for an engine name. An engine it does not know gets the narrower
+// reading: recognizing a marker that sqlc did not is the failure worth avoiding.
+func RulesFor(engine string) Rules {
+	switch engine {
+	case "postgresql", "sqlite":
+		return Rules{AtForm: true}
+	case "mysql":
+		return Rules{HashComments: true}
+	}
+	return Rules{}
+}
+
+// OperatorByte reports whether b can be part of a SQL operator. A marker is only a marker when
+// what precedes it is not one: `<@`, `@@` and their relatives end in @, and reading the name
+// after them as a bind invents a parameter.
+func OperatorByte(b byte) bool {
+	switch b {
+	case '+', '-', '*', '/', '<', '>', '=', '~', '!', '@', '#', '%', '^', '&', '|', '`', '?':
+		return true
+	}
+	return false
+}
 
 var callForms = []struct {
 	prefix string
@@ -95,17 +119,22 @@ func (r Rules) Malformed(s string) (string, bool) {
 	return "", false
 }
 
-// atName reads @name. The name is a bare identifier; a dotted name has only the quoted call
-// spelling, since sqlc rejects @a.b too.
+// atName reads @name. The name is a bare identifier that follows the @ directly: PostgreSQL
+// has operators ending in @, and skipping space here turned `array[…] <@ tags` into a bind on
+// `tags` that sqlc never made. A dotted name has only the quoted call spelling, since sqlc
+// rejects @a.b too.
 func atName(s string) (string, int, bool) {
 	if !strings.HasPrefix(s, "@") {
 		return "", 0, false
 	}
-	name, n, ok := leadingIdent(s[1:])
-	if !ok {
+	i := 1
+	for i < len(s) && isIdent(s[i], i == 1) {
+		i++
+	}
+	if i == 1 {
 		return "", 0, false
 	}
-	return name, n + 1, true
+	return s[1:i], i, true
 }
 
 // argument reads a call argument, `name)` or `'name')`. Only the quoted spelling may carry a

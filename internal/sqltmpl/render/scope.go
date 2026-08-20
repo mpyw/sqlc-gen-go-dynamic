@@ -6,124 +6,106 @@ import (
 	"strings"
 )
 
-// Scope resolves the names a template refers to.
+// Scope resolves the names a template refers to. Its keys are folded, and so are the names the
+// expression language looks up, so a field reaches every spelling of itself: what a template
+// writes (activeOnly, min_age) and what Go writes (ActiveOnly, MinAge) differ, and guessing
+// which spellings to index was a guess that silently failed — an unfound name in a condition is
+// nil, which is a branch that quietly disappears.
 type Scope map[string]any
 
 // Scoper is implemented by a value that names its own fields. Generated params structs do,
-// because only the generator knows both spellings: the template writes activeOnly and
-// c.name, while Go writes ActiveOnly and Name.
+// which spares the reflection below; either way the keys end up folded.
 type Scoper interface {
 	TemplateScope() map[string]any
 }
 
-// scopeOf converts a value into a Scope. A Scoper says so itself; a map is taken as is; a
-// struct is reflected, with its field names folded so that either spelling resolves.
+// maxPointerDepth caps the pointer unwrapping. A self-referential pointer type is legal Go and
+// would otherwise spin forever inside a public API.
+const maxPointerDepth = 32
+
+// scopeOf converts a value into a Scope.
 func scopeOf(v any) (Scope, error) {
 	switch p := v.(type) {
 	case nil:
 		return Scope{}, nil
 	case Scope:
-		return p, nil
+		return folded(p)
 	case map[string]any:
-		return p, nil
+		return folded(p)
 	case Scoper:
-		return p.TemplateScope(), nil
+		return folded(p.TemplateScope())
 	}
-	rv := reflect.ValueOf(v)
-	for rv.Kind() == reflect.Pointer {
-		if rv.IsNil() {
-			return Scope{}, nil
-		}
-		rv = rv.Elem()
+	rv, ok := deref(reflect.ValueOf(v))
+	if !ok {
+		return Scope{}, nil
 	}
 	if rv.Kind() != reflect.Struct {
 		return nil, fmt.Errorf("template: cannot use %T as parameters (want a struct, a map, or a Scoper)", v)
 	}
-	return structScope(rv), nil
+	return structScope(rv)
 }
 
-// structScope indexes a struct's exported fields under every spelling a template might use.
-// It has to: a condition is evaluated by the expression language against these keys, which
-// resolves them exactly, and a plain struct carries no record of what the template wrote.
-// Generated code implements Scoper instead and gives the exact keys.
-func structScope(rv reflect.Value) Scope {
-	t := rv.Type()
-	sc := make(Scope, t.NumField()*4)
-	for i := 0; i < t.NumField(); i++ {
-		f := t.Field(i)
-		if !f.IsExported() {
-			continue
+// folded re-keys a caller's map. A collision means two names that a template cannot tell apart,
+// which is reported rather than resolved by iteration order.
+func folded(m map[string]any) (Scope, error) {
+	sc := make(Scope, len(m))
+	from := make(map[string]string, len(m))
+	for k, v := range m {
+		f := fold(k)
+		if prev, dup := from[f]; dup && prev != k && !reflect.DeepEqual(sc[f], v) {
+			return nil, fmt.Errorf("template: %q and %q are the same name once case and "+
+				"underscores are folded, so a template cannot say which is meant", prev, k)
 		}
-		v := rv.Field(i).Interface()
-		for _, k := range spellings(f.Name) {
-			sc[k] = v
-		}
+		from[f], sc[f] = k, v
 	}
-	return sc
+	return sc, nil
 }
 
-// spellings lists the forms an exported Go name is written in elsewhere: as itself, as
-// camelCase in a directive condition, as snake_case in a sqlc parameter, and folded.
-func spellings(goName string) []string {
-	out := []string{goName}
-	for _, s := range []string{lowerFirst(goName), snake(goName), fold(goName)} {
-		if !slicesContains(out, s) {
-			out = append(out, s)
-		}
-	}
-	return out
-}
+// structScope indexes a struct's exported fields, promoting an embedded struct's fields to
+// their bare names as Go itself does: shallower wins, so an outer field shadows an embedded one
+// rather than colliding with it.
+func structScope(rv reflect.Value) (Scope, error) {
+	sc := Scope{}
+	from := map[string]string{}
+	depth := map[string]int{}
 
-func slicesContains(ss []string, s string) bool {
-	for _, e := range ss {
-		if e == s {
-			return true
-		}
-	}
-	return false
-}
-
-// lowerFirst lowercases the leading run of capitals but one, so ActiveOnly becomes
-// activeOnly and ID becomes id.
-func lowerFirst(s string) string {
-	if s == "" {
-		return s
-	}
-	n := 0
-	for n < len(s) && s[n] >= 'A' && s[n] <= 'Z' {
-		n++
-	}
-	if n > 1 && n < len(s) {
-		n-- // the last capital starts the next word
-	}
-	return strings.ToLower(s[:n]) + s[n:]
-}
-
-// snake converts an exported Go name to snake_case, keeping a run of capitals together so
-// APIURL becomes api_url.
-func snake(s string) string {
-	var b strings.Builder
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		upper := c >= 'A' && c <= 'Z'
-		if upper && i > 0 {
-			prevLower := s[i-1] >= 'a' && s[i-1] <= 'z' || s[i-1] >= '0' && s[i-1] <= '9'
-			nextLower := i+1 < len(s) && s[i+1] >= 'a' && s[i+1] <= 'z'
-			if prevLower || nextLower {
-				b.WriteByte('_')
+	level := []reflect.Value{rv}
+	for d := 0; len(level) > 0; d++ {
+		var next []reflect.Value
+		for _, sv := range level {
+			t := sv.Type()
+			for i := 0; i < t.NumField(); i++ {
+				f := t.Field(i)
+				if f.Anonymous {
+					if ev, ok := deref(sv.Field(i)); ok && ev.Kind() == reflect.Struct {
+						next = append(next, ev)
+					}
+				}
+				if !f.IsExported() {
+					continue
+				}
+				key := fold(f.Name)
+				if prev, seen := from[key]; seen {
+					if depth[key] < d {
+						continue // the shallower field wins, as Go's promotion does
+					}
+					if prev != f.Name {
+						return nil, fmt.Errorf("template: fields %q and %q are the same name "+
+							"once case and underscores are folded, so a template cannot say "+
+							"which is meant", prev, f.Name)
+					}
+				}
+				from[key], depth[key], sc[key] = f.Name, d, sv.Field(i).Interface()
 			}
 		}
-		if upper {
-			c += 'a' - 'A'
-		}
-		b.WriteByte(c)
+		level = next
 	}
-	return b.String()
+	return sc, nil
 }
 
-// elementScope prepares a loop element for the scope. A struct has to become a Scope: the
-// expression language resolves a member by its exact Go field name, so a condition reading
-// c.enabled would not find Enabled. Anything else is used as it is.
+// elementScope prepares a loop element for the scope. A struct has to become a Scope, since the
+// expression language reads a member by name; the element itself is kept elsewhere for a bind
+// that takes it whole.
 func elementScope(v any) any {
 	switch v.(type) {
 	case nil, Scope, map[string]any:
@@ -138,7 +120,7 @@ func elementScope(v any) any {
 // lookup resolves a dotted path: a scope entry, then a field of whatever it found.
 func lookup(sc Scope, path string) (any, bool) {
 	head, rest, _ := strings.Cut(path, ".")
-	v, ok := entry(sc, head)
+	v, ok := sc[fold(head)]
 	if !ok || rest == "" {
 		return v, ok
 	}
@@ -149,6 +131,26 @@ func lookup(sc Scope, path string) (any, bool) {
 		}
 	}
 	return v, true
+}
+
+// field reads a member of v by its folded name.
+func field(v any, name string) (any, bool) {
+	if m, ok := asMap(v); ok {
+		e, ok := m[fold(name)]
+		return e, ok
+	}
+	rv, ok := deref(reflect.ValueOf(v))
+	if !ok || rv.Kind() != reflect.Struct {
+		return nil, false
+	}
+	want := fold(name)
+	t := rv.Type()
+	for i := 0; i < t.NumField(); i++ {
+		if f := t.Field(i); f.IsExported() && fold(f.Name) == want {
+			return rv.Field(i).Interface(), true
+		}
+	}
+	return nil, false
 }
 
 // asMap unwraps the two map forms a scope entry can hold: a Scope, from a converted loop
@@ -163,45 +165,19 @@ func asMap(v any) (map[string]any, bool) {
 	return nil, false
 }
 
-func entry(sc Scope, name string) (any, bool) {
-	if v, ok := sc[name]; ok {
-		return v, true
-	}
-	v, ok := sc[fold(name)]
-	return v, ok
-}
-
-// field reads a member of v, matching a folded name so that name finds Name.
-func field(v any, name string) (any, bool) {
-	if m, ok := asMap(v); ok {
-		if e, ok := m[name]; ok {
-			return e, true
-		}
-		e, ok := m[fold(name)]
-		return e, ok
-	}
-	rv := reflect.ValueOf(v)
-	for rv.Kind() == reflect.Pointer {
-		if rv.IsNil() {
-			return nil, false
+// deref unwraps pointers up to the depth cap, reporting false for a nil along the way.
+func deref(rv reflect.Value) (reflect.Value, bool) {
+	for i := 0; rv.Kind() == reflect.Pointer; i++ {
+		if rv.IsNil() || i == maxPointerDepth {
+			return rv, false
 		}
 		rv = rv.Elem()
 	}
-	if rv.Kind() != reflect.Struct {
-		return nil, false
-	}
-	want := fold(name)
-	t := rv.Type()
-	for i := 0; i < t.NumField(); i++ {
-		if f := t.Field(i); f.IsExported() && fold(f.Name) == want {
-			return rv.Field(i).Interface(), true
-		}
-	}
-	return nil, false
+	return rv, true
 }
 
-// fold collapses the spellings one name arrives in: camelCase from a template, snake_case
-// from sqlc, and the exported Go form.
+// fold collapses the spellings one name arrives in: camelCase from a template, snake_case from
+// sqlc, and the exported Go form.
 func fold(s string) string {
 	var b strings.Builder
 	for _, r := range s {

@@ -115,8 +115,8 @@ func TestPreparedQueryRenders(t *testing.T) {
 	}
 	params := map[string]any{
 		"activeOnly": true, "status": "active",
-		"departmentId": 3, "department_id": 3,
-		"ageBand": "senior", "senior_age": 65,
+		"department_id": 3,
+		"ageBand":       "senior", "senior_age": 65,
 		"ids":    []any{1, 2},
 		"conds":  []map[string]any{{"name": "%a%", "status": "active"}},
 		"groups": []map[string]any{{"tags": []map[string]any{{"value": "vip"}}}},

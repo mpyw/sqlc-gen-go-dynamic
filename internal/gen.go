@@ -371,6 +371,13 @@ func filterUnusedStructs(enums []Enum, structs []Struct, queries []Query) ([]Enu
 	keepTypes := make(map[string]struct{})
 
 	for _, query := range queries {
+		// A dynamic query's params struct is not built from Arg.Struct, so the models and enums
+		// it reaches have to be named here or they are filtered away and the file stops
+		// compiling.
+		for _, t := range query.DynamicTypes {
+			keepTypes[t] = struct{}{}
+			keepTypes[strings.TrimPrefix(strings.TrimPrefix(t, "[]"), "*")] = struct{}{}
+		}
 		if !query.Arg.isEmpty() {
 			keepTypes[query.Arg.Type()] = struct{}{}
 			if query.Arg.IsStruct() {

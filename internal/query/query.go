@@ -30,7 +30,6 @@ type Param struct {
 	Explicit bool   // the type came from an override, so nothing is added to it
 	NotNull  bool
 	IsSlice  bool
-	Nullable bool // written as sqlc.narg; indistinguishable from a nullable column in the request
 }
 
 // Column is one result column. Embed names a table when the column stands for the whole of
@@ -146,7 +145,7 @@ func imports(in Input) []string {
 func restoreParams(ps []Param) []placeholder.Param {
 	out := make([]placeholder.Param, len(ps))
 	for i, p := range ps {
-		out[i] = placeholder.Param{Number: p.Number, Name: p.Name, Nullable: p.Nullable, List: p.IsSlice}
+		out[i] = placeholder.Param{Number: p.Number, Name: p.Name, List: p.IsSlice}
 	}
 	return out
 }

@@ -3,6 +3,8 @@ package exprtype
 import (
 	"fmt"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // initialisms are spelled in full caps in Go field names.
@@ -11,7 +13,9 @@ var initialisms = map[string]string{
 	"sql": "SQL", "http": "HTTP", "json": "JSON", "uuid": "UUID", "ip": "IP",
 }
 
-// GoName converts a bind or condition variable name to an exported Go field name.
+// GoName converts a bind or condition variable name to an exported Go field name. It titles
+// by rune rather than by byte, so a name that starts with a multi-byte character is not cut in
+// half. Whether the result can be a Go identifier at all is ValidName's question.
 func GoName(s string) string {
 	var b strings.Builder
 	for _, part := range splitWords(s) {
@@ -19,9 +23,36 @@ func GoName(s string) string {
 			b.WriteString(up)
 			continue
 		}
-		b.WriteString(strings.ToUpper(part[:1]) + part[1:])
+		r, size := utf8.DecodeRuneInString(part)
+		b.WriteString(strings.ToUpper(string(r)) + part[size:])
 	}
 	return b.String()
+}
+
+// ValidName reports whether a name yields an exported Go identifier. A name that does not
+// would otherwise reach the generated source and fail there as a syntax error, naming a line
+// of generated code rather than the template that caused it.
+func ValidName(name string) bool {
+	g := GoName(name)
+	if g == "" {
+		return false
+	}
+	for i, r := range g {
+		switch {
+		case r == '_':
+		case unicode.IsLetter(r):
+			if i == 0 && !unicode.IsUpper(r) {
+				return false
+			}
+		case unicode.IsDigit(r):
+			if i == 0 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // splitWords breaks both snake_case and camelCase into their words.
@@ -47,6 +78,15 @@ func splitWords(s string) []string {
 	}
 	flush()
 	return words
+}
+
+// elementName is what to call the type a field holds. Only a slice's element is de-pluralized;
+// a struct field is named after itself.
+func elementName(m Member) string {
+	if m.Type != nil && m.Type.Kind == Slice {
+		return singular(m.Name)
+	}
+	return m.Name
 }
 
 // singular is a deliberately crude de-pluralizer for naming loop element structs.
@@ -89,7 +129,7 @@ func (n *namer) children(t *Type, prefix string, path []string) {
 	}
 	for _, m := range t.Fields() {
 		sub := append(append([]string{}, path...), m.Name)
-		n.name(m.Type, prefix+GoName(singular(m.Name)), sub)
+		n.name(m.Type, prefix+GoName(elementName(m)), sub)
 	}
 }
 
@@ -133,6 +173,11 @@ func (n *namer) unique(candidate string, path []string) string {
 func GoType(t *Type) string {
 	switch t.Kind {
 	case Struct:
+		// A Go struct value is never nil, so a nil test on one would be a tautology unless it
+		// can hold nil.
+		if t.Optional && !t.Explicit {
+			return "*" + t.Name
+		}
 		return t.Name
 	case Slice:
 		// A nil slice already expresses "absent", so optionality needs no pointer.
@@ -160,6 +205,36 @@ func GoType(t *Type) string {
 		return "*" + base
 	}
 	return base
+}
+
+// Types lists every Go type the declarations mention, deduplicated. Import resolution and
+// unused-struct filtering both work by asking which types a file uses, and a params struct
+// built here is invisible to them otherwise.
+func Types(t *Type) []string {
+	seen := map[string]bool{}
+	var out []string
+	var walk func(*Type)
+	walk = func(t *Type) {
+		switch t.Kind {
+		case Slice:
+			if t.Elem != nil {
+				walk(t.Elem)
+			}
+			return
+		case Struct:
+			for _, m := range t.Fields() {
+				walk(m.Type)
+			}
+			return
+		}
+		name := strings.TrimPrefix(GoType(t), "*")
+		if name != "" && !seen[name] {
+			seen[name] = true
+			out = append(out, name)
+		}
+	}
+	walk(t)
+	return out
 }
 
 // Declare renders t and every struct reachable from it as Go type declarations,

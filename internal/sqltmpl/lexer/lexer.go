@@ -38,12 +38,17 @@ func (l *Lexer) Next() (Token, error) {
 	start := c.I
 	for !c.Done() {
 		switch {
+		case c.AtDollarQuote():
+			if err := c.SkipDollarQuote(); err != nil {
+				return Token{}, fmt.Errorf("template: %w", err)
+			}
+
 		case c.AtQuote():
 			if err := c.SkipQuoted(); err != nil {
 				return Token{}, fmt.Errorf("template: %w", err)
 			}
 
-		case c.AtLineComment():
+		case c.AtLineComment(), l.rules.HashComments && c.At() == '#':
 			c.SkipLine()
 
 		case c.AtBlockComment():
@@ -68,6 +73,12 @@ func (l *Lexer) Next() (Token, error) {
 			return tok, nil
 
 		default:
+			// A marker cannot follow an operator: `<@ tags` and `@@ x` end in @, and the name
+			// after them belongs to the operator, not to a bind.
+			if c.I > 0 && bind.OperatorByte(c.Src[c.I-1]) {
+				c.I++
+				continue
+			}
 			rest := c.Src[c.I:]
 			if reason, bad := l.rules.Malformed(rest); bad {
 				return Token{}, fmt.Errorf("template: %s", reason)
@@ -123,9 +134,16 @@ func (l *Lexer) blockComment() (Token, commentClass, error) {
 			k = token.Elseif
 		}
 		return Token{Kind: k, Text: rest}, directive, nil
-	case "else":
-		return Token{Kind: token.Else}, directive, nil
-	case "end":
+	case "else", "end":
+		// Neither takes anything after it, and reading one that does as though it did not is
+		// how /*%else if x*/ becomes an unconditional else with the condition dropped.
+		if rest != "" {
+			return Token{}, directive, fmt.Errorf(
+				"template: /*%%%s*/ takes nothing after it, got %q", word, rest)
+		}
+		if word == "else" {
+			return Token{Kind: token.Else}, directive, nil
+		}
 		return Token{Kind: token.End}, directive, nil
 	case "for":
 		v, iter, err := forHeader(rest)

@@ -32,11 +32,12 @@ type scopeEntry struct {
 }
 
 type inferrer struct {
-	root    *Type
-	scope   []scopeEntry
-	params  map[string]SQLParam
-	aliases [][2]*Type // places an expression proved to have the same type
-	diags   []Diagnostic
+	root       *Type
+	scope      []scopeEntry
+	params     map[string]SQLParam
+	aliases    [][2]*Type // places an equality proved to have the same type
+	aliasPaths []string   // what to name in a diagnostic about aliases[i]
+	diags      []Diagnostic
 }
 
 // Infer walks a template tree and returns the params struct type together with everything it
@@ -44,11 +45,20 @@ type inferrer struct {
 func Infer(nodes []ast.Node, params []SQLParam) (*Type, []Diagnostic) {
 	in := &inferrer{root: newStruct(), params: map[string]SQLParam{}}
 	for _, p := range params {
-		in.params[normalize(p.Name)] = p
+		k := normalize(p.Name)
+		if prev, dup := in.params[k]; dup && prev.Name != p.Name {
+			in.diags = append(in.diags, Diagnostic{
+				Path: p.Name,
+				Msg: fmt.Sprintf("collides with parameter %q once case and underscores are "+
+					"folded, so a marker cannot say which is meant", prev.Name),
+			})
+		}
+		in.params[k] = p
 	}
 	in.nodes(nodes)
 	in.settleAliases()
 	in.checkUndecided(in.root, "")
+	in.checkNames(in.root, "")
 	return in.root, in.diags
 }
 
@@ -182,7 +192,7 @@ func (in *inferrer) visit(n exprast.Node, want Kind, src string) Kind {
 		return Unknown
 
 	case *exprast.BinaryNode:
-		return in.binary(n, src)
+		return in.binary(n, want, src)
 
 	case *exprast.BuiltinNode:
 		return in.builtin(n, src)
@@ -268,7 +278,7 @@ func (in *inferrer) builtin(n *exprast.BuiltinNode, src string) Kind {
 	return result
 }
 
-func (in *inferrer) binary(n *exprast.BinaryNode, src string) Kind {
+func (in *inferrer) binary(n *exprast.BinaryNode, want Kind, src string) Kind {
 	switch n.Operator {
 	case "&&", "||", "and", "or":
 		in.visit(n.Left, Bool, src)
@@ -276,9 +286,13 @@ func (in *inferrer) binary(n *exprast.BinaryNode, src string) Kind {
 		return Bool
 
 	case "??":
+		// The right operand is the fallback, so it is what says what the expression is.
 		in.markOptional(n.Left, src)
-		k := in.visit(n.Left, Unknown, src)
-		in.visit(n.Right, k, src)
+		k := in.visit(n.Right, want, src)
+		if k == Unknown {
+			k = want
+		}
+		in.visit(n.Left, k, src)
 		return k
 
 	case "==", "!=":
@@ -292,17 +306,24 @@ func (in *inferrer) binary(n *exprast.BinaryNode, src string) Kind {
 			in.markOptional(n.Right, src)
 			return Bool
 		}
-		fallthrough
+		in.compare(n.Left, n.Right, src, true)
+		return Bool
 
 	case "<", ">", "<=", ">=":
-		in.compare(n.Left, n.Right, src)
+		// Ordering does not prove the operands share a type: expr compares an int with a
+		// float happily. Only a literal pins anything here.
+		in.compare(n.Left, n.Right, src, false)
 		return Bool
 
 	case "in", "not in":
-		// A literal set on the right tells us the element shape outright.
+		// A literal set on the right tells us the element shape outright. The set is still
+		// visited: an element that is not a literal names a variable the template needs.
 		if arr, ok := n.Right.(*exprast.ArrayNode); ok && len(arr.Nodes) > 0 {
 			if k := literalKind(arr.Nodes[0]); k != Unknown {
 				in.visit(n.Left, k, src)
+				for _, e := range arr.Nodes {
+					in.visit(e, k, src)
+				}
 				return Bool
 			}
 		}
@@ -313,9 +334,9 @@ func (in *inferrer) binary(n *exprast.BinaryNode, src string) Kind {
 		return Bool
 
 	case "+", "-", "*", "/", "%", "**", "^":
-		// expr's + concatenates strings as well as adding numbers, so only a literal
-		// operand pins anything here.
-		in.compare(n.Left, n.Right, src)
+		// expr's + concatenates strings as well as adding numbers, and its arithmetic mixes
+		// int with float, so only a literal operand pins anything here.
+		in.compare(n.Left, n.Right, src, false)
 		return Unknown
 
 	case "matches", "contains", "startsWith", "endsWith":
@@ -332,7 +353,7 @@ func (in *inferrer) binary(n *exprast.BinaryNode, src string) Kind {
 // literal on either side fixes the shape for both; two variables only prove that
 // they agree, which is recorded so that whichever one is resolved elsewhere
 // resolves the other too.
-func (in *inferrer) compare(left, right exprast.Node, src string) {
+func (in *inferrer) compare(left, right exprast.Node, src string, equality bool) {
 	lk, rk := literalKind(left), literalKind(right)
 	switch {
 	case lk != Unknown:
@@ -342,10 +363,13 @@ func (in *inferrer) compare(left, right exprast.Node, src string) {
 		in.visit(left, rk, src)
 		in.visit(right, rk, src)
 	default:
-		lp, rp := in.resolveNode(left, src), in.resolveNode(right, src)
-		if lp.ok && rp.ok {
-			in.aliases = append(in.aliases, [2]*Type{lp.typ, rp.typ})
-			return
+		if equality {
+			lp, rp := in.resolveNode(left, src), in.resolveNode(right, src)
+			if lp.ok && rp.ok {
+				in.aliases = append(in.aliases, [2]*Type{lp.typ, rp.typ})
+				in.aliasPaths = append(in.aliasPaths, lp.path+" and "+rp.path)
+				return
+			}
 		}
 		in.visit(left, Unknown, src)
 		in.visit(right, Unknown, src)
@@ -353,20 +377,39 @@ func (in *inferrer) compare(left, right exprast.Node, src string) {
 }
 
 // constrain records a fact about an expression's variable that narrows it without
-// determining a Go type.
+// determining a Go type. An operand that is not a place is visited instead, so the variables
+// inside it are still reached: a name this never sees is a name the generated scope will not
+// carry, and the condition would then read nil at run time.
 func (in *inferrer) constrain(n exprast.Node, c Constraint, src string) {
 	if p := in.resolveNode(n, src); p.ok {
 		p.typ.Constraints |= c
+		return
 	}
+	in.visit(n, Unknown, src)
 }
 
-// settleAliases propagates what is known across every proved-equal pair until
-// nothing more can be learned.
+// settleAliases propagates what is known across every proved-equal pair until nothing more
+// can be learned, and reports a pair that cannot be reconciled. Filling gaps alone would
+// accept two incompatible pins joined by an equality, which is a wrong type rather than a
+// missing one.
 func (in *inferrer) settleAliases() {
+	reported := make([]bool, len(in.aliases))
 	for changed := true; changed; {
 		changed = false
-		for _, pair := range in.aliases {
-			if copyKnown(pair[0], pair[1]) || copyKnown(pair[1], pair[0]) {
+		for i, pair := range in.aliases {
+			a, b := pair[0], pair[1]
+			if a.Kind != Unknown && b.Kind != Unknown && a.Kind != b.Kind {
+				if !reported[i] {
+					reported[i] = true
+					in.diags = append(in.diags, Diagnostic{
+						Path: in.aliasPaths[i],
+						Msg: fmt.Sprintf("compared with each other but typed %s and %s",
+							a.Kind, b.Kind),
+					})
+				}
+				continue
+			}
+			if copyKnown(a, b) || copyKnown(b, a) {
 				changed = true
 			}
 		}
@@ -381,8 +424,10 @@ func copyKnown(src, dst *Type) bool {
 		dst.Kind, dst.why = src.Kind, src.why+" (via a comparison)"
 		learned = true
 	}
-	if dst.GoType == "" && src.GoType != "" {
-		dst.GoType = src.GoType
+	// The Go type only travels with a shape that agrees; otherwise the alias would stamp a
+	// concrete type onto a variable pinned to something else.
+	if dst.GoType == "" && src.GoType != "" && dst.Kind == src.Kind {
+		dst.GoType, dst.Explicit = src.GoType, src.Explicit
 		learned = true
 	}
 	if dst.Constraints|src.Constraints != dst.Constraints {
@@ -392,11 +437,17 @@ func copyKnown(src, dst *Type) bool {
 	return learned
 }
 
-// markOptional records that a place may be absent, without constraining its shape.
+// markOptional records that a place may be absent, without constraining its shape. As with
+// constrain, an operand that is not a place is visited so nothing inside it is lost.
 func (in *inferrer) markOptional(n exprast.Node, src string) {
+	if isNil(n) {
+		return
+	}
 	if p := in.resolveNode(n, src); p.ok {
 		p.typ.Optional = true
+		return
 	}
+	in.visit(n, Unknown, src)
 }
 
 // literalKind reports the type a literal pins, unwrapping a leading sign so that
@@ -451,12 +502,19 @@ func (in *inferrer) resolveNode(n exprast.Node, src string) place {
 	case *exprast.MemberNode:
 		base := in.resolveNode(n.Node, src)
 		if !base.ok {
+			// The base is an expression rather than a place — a call, an arithmetic result.
+			// It still has to be walked, or the variables inside it are never seen.
+			in.visit(n.Node, Unknown, src)
 			return base
 		}
 		if n.Optional {
 			base.typ.Optional = true
 		}
 		if prop, ok := n.Property.(*exprast.StringNode); ok {
+			// Reading a member proves the base is a struct. Saying so here is what turns a
+			// member access on a slice or a scalar into a conflict instead of a value quietly
+			// filed under a shape that never reads it back.
+			in.unify(base.typ, Struct, "member access", base.path)
 			return place{typ: base.typ.field(prop.Value), path: base.path + "." + prop.Value, ok: true}
 		}
 		// Indexing. An integer index means a slice; a computed or string index could
@@ -476,8 +534,10 @@ func (in *inferrer) resolveNode(n exprast.Node, src string) place {
 // rootOf resolves the first segment of a path: a loop variable if one is in scope,
 // otherwise a field of the params struct.
 func (in *inferrer) rootOf(name string) *Type {
+	// Folded, as parameter names are: a marker spelling the loop variable differently must
+	// still reach the element rather than inventing a root field.
 	for i := len(in.scope) - 1; i >= 0; i-- {
-		if in.scope[i].name == name {
+		if normalize(in.scope[i].name) == normalize(name) {
 			return in.scope[i].elem
 		}
 	}
@@ -530,6 +590,15 @@ func (in *inferrer) unify(t *Type, kind Kind, why, path string) {
 		return
 	}
 	if kind == Opaque {
+		// A scalar sqlc named cannot replace a shape something else proved: a slice a
+		// /*%for*/ iterates, or a struct a member access reached.
+		if t.Kind == Slice || t.Kind == Struct {
+			in.diags = append(in.diags, Diagnostic{
+				Path: path,
+				Msg:  fmt.Sprintf("used as a %s but sqlc types it as %s", t.Kind, t.GoType),
+			})
+			return
+		}
 		t.Kind, t.why = kind, why
 		return
 	}
@@ -555,12 +624,45 @@ func (in *inferrer) checkUndecided(t *Type, path string) {
 		}
 		in.checkUndecided(t.Elem, path+"[]")
 	case Struct:
+		if len(t.Fields()) == 0 {
+			in.diags = append(in.diags, Diagnostic{
+				Path: path,
+				Msg:  "is a struct with no fields, so nothing said what it holds" + advice,
+			})
+			return
+		}
 		for _, m := range t.Fields() {
 			sub := m.Name
 			if path != "" {
 				sub = path + "." + m.Name
 			}
 			in.checkUndecided(m.Type, sub)
+		}
+	}
+}
+
+// checkNames reports a name that cannot become an exported Go identifier, so the complaint
+// names the template's own spelling rather than surfacing as a syntax error in generated code.
+func (in *inferrer) checkNames(t *Type, path string) {
+	switch t.Kind {
+	case Slice:
+		if t.Elem != nil {
+			in.checkNames(t.Elem, path+"[]")
+		}
+	case Struct:
+		for _, m := range t.Fields() {
+			sub := m.Name
+			if path != "" {
+				sub = path + "." + m.Name
+			}
+			if !ValidName(m.Name) {
+				in.diags = append(in.diags, Diagnostic{
+					Path: sub,
+					Msg:  "cannot be an exported Go identifier; rename it in the template",
+				})
+				continue
+			}
+			in.checkNames(m.Type, sub)
 		}
 	}
 }
@@ -573,7 +675,9 @@ func refusal(t *Type) string {
 		b.WriteString(": all that is known is that it ")
 		b.WriteString(d)
 	}
-	b.WriteString(". Bind it in the SQL, compare it with a literal, iterate it with " +
-		"/*%for*/ and bind something in the body, or replace the condition with a boolean gate")
+	b.WriteString(advice)
 	return b.String()
 }
+
+const advice = ". Bind it in the SQL, compare it with a literal, iterate it with " +
+	"/*%for*/ and bind something in the body, or replace the condition with a boolean gate"

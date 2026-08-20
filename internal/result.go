@@ -181,8 +181,34 @@ func argName(name string) string {
 	return out
 }
 
+// uniqueName returns name, or name with a suffix, so that a minted identifier cannot shadow
+// one sqlc already owns. Without it a query called SearchUsersTemplate and a dynamic
+// SearchUsers declare the same identifier in one file.
+func uniqueName(name string, taken map[string]struct{}) string {
+	out := name
+	for i := 2; ; i++ {
+		if _, clash := taken[out]; !clash {
+			taken[out] = struct{}{}
+			return out
+		}
+		out = fmt.Sprintf("%s%d", name, i)
+	}
+}
+
 func buildQueries(req *plugin.GenerateRequest, options *opts.Options, structs []Struct) ([]Query, error) {
 	qs := make([]Query, 0, len(req.Queries))
+	// Every identifier the file will declare, so a minted one can avoid them.
+	taken := make(map[string]struct{}, len(req.Queries)*2)
+	for _, q := range req.Queries {
+		if q.Name == "" {
+			continue
+		}
+		if options.EmitExportedQueries {
+			taken[sdk.Title(q.Name)] = struct{}{}
+		} else {
+			taken[sdk.LowerTitle(q.Name)] = struct{}{}
+		}
+	}
 	for _, query := range req.Queries {
 		if query.Name == "" {
 			continue
@@ -352,11 +378,18 @@ func buildQueries(req *plugin.GenerateRequest, options *opts.Options, structs []
 			if _, ok := dynamicSupported[query.Cmd]; !ok {
 				return nil, fmt.Errorf("%s: directives are not supported with %s", query.Name, query.Cmd)
 			}
+			if options.EmitPreparedQueries {
+				// A prepared statement is fixed SQL, which a template is not; preparing the
+				// template text fails against any server.
+				return nil, fmt.Errorf("%s: directives cannot be combined with "+
+					"emit_prepared_queries", query.Name)
+			}
 			gq.Dynamic = true
 			gq.Engine = dyn.Engine
 			gq.SQL = dyn.Template
-			gq.TemplateVar = sdk.LowerTitle(query.Name) + "Template"
+			gq.TemplateVar = uniqueName(sdk.LowerTitle(query.Name)+"Template", taken)
 			gq.DynamicDecls = dyn.Decls
+			gq.DynamicTypes = dyn.Types
 			gq.Arg = QueryValue{Name: "arg", Typ: dyn.ParamsType, SQLDriver: sqlpkg}
 		}
 
@@ -369,12 +402,13 @@ func buildQueries(req *plugin.GenerateRequest, options *opts.Options, structs []
 // dynamicSupported are the commands a template may branch in. The rest — copyfrom and the
 // batch forms — build their SQL by other means, and refusing them is better than emitting
 // something that ignores the directives.
+// dynamicSupported are the commands whose templates have a dynamic body. Listing one without
+// that body is worse than refusing it: the query reaches a static branch that sends the
+// template text to the server as SQL, or crashes rendering it.
 var dynamicSupported = map[string]struct{}{
-	metadata.CmdOne:        {},
-	metadata.CmdMany:       {},
-	metadata.CmdExec:       {},
-	metadata.CmdExecRows:   {},
-	metadata.CmdExecResult: {},
+	metadata.CmdOne:  {},
+	metadata.CmdMany: {},
+	metadata.CmdExec: {},
 }
 
 var cmdReturnsData = map[string]struct{}{

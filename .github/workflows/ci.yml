@@ -16,9 +16,10 @@ jobs:
       - uses: jdx/mise-action@v2
         with:
           cache: true
-      # Installs the pinned toolchain (go, golangci-lint, deadcode) from mise.toml, then runs
-      # the full gate: fmt, build, vet, lint, deadcode, test -race.
+      # Installs the pinned toolchain from mise.toml, then runs the gate: fmt, build, vet,
+      # test -race. Lint is its own step so an upstream file failing it is legible as that.
       - run: mise run check
+      - run: mise run lint
       # Coverage: one holistic profile for the module (coverage.out).
       - run: mise run cover
       - name: Upload coverage
@@ -27,18 +28,6 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage.out
           fail_ci_if_error: false
-
-  # The example (testdata/example) is a separate module with its own dependencies — that is
-  # what makes the go tool compile and run the generated code rather than only compare it as
-  # text. It is checked but excluded from coverage, so it runs as its own job.
-  example:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: jdx/mise-action@v2
-        with:
-          cache: true
-      - run: mise run example
 
   # The claim the design rests on is that real sqlc's output is enough, so the loop is run
   # against real sqlc: generate from a schema and a template, then compile the result.
@@ -50,3 +39,14 @@ jobs:
         with:
           cache: true
       - run: mise run sqlc
+
+  # Both transports have to build: the process one is what a local project uses, and the WASM
+  # one is what a shared configuration points at.
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+        with:
+          cache: true
+      - run: mise run wasm

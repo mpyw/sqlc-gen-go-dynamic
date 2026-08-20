@@ -70,6 +70,25 @@ type Query struct {
 	Imports []string
 }
 
+// HasDirectives reports whether anything in the template has to be decided per call. A
+// template of nothing but text and markers renders the same SQL every time, and is left to be
+// emitted as a constant.
+func (q *Query) HasDirectives() bool { return hasDirectives(q.Nodes) }
+
+func hasDirectives(ns []ast.Node) bool {
+	for _, n := range ns {
+		switch n := n.(type) {
+		case ast.If:
+			return true
+		case ast.For:
+			return true
+		case ast.Bind:
+			_ = n
+		}
+	}
+	return false
+}
+
 // Prepare validates and prepares a query. Diagnostics from typing are returned alongside the
 // result, since each names a variable rather than invalidating the whole query.
 func Prepare(in Input) (*Query, []exprtype.Diagnostic, error) {

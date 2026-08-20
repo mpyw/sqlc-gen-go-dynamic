@@ -2,7 +2,7 @@
 -- column zero out of the query text, taking the rest of its line with it.
 
 -- name: SearchUsers :many
-select id, name, balance, seen_at, tags, note
+select id, name, seen_at, note
 from users
 where 1 = 1
   /*%if activeOnly*/ and status = @status /*%end*/
@@ -11,8 +11,14 @@ where 1 = 1
   /*%for c in conds*/ and (name like sqlc.arg('c.name') or status = sqlc.arg('c.status')) /*%end*/
 order by /*%if byName*/ name, /*%end*/ id;
 
--- name: CountUsers :one
-select count(*) as total from users where status = sqlc.arg(status);
-
 -- name: TouchUser :exec
-update users set seen_at = now() where id = @id;
+update users set seen_at = now() where id = @id
+  /*%if activeOnly*/ and status = @status /*%end*/;
+
+-- A query with no directives has to come out exactly as it would without this plugin:
+-- positional arguments, no params struct, no runtime.
+-- name: GetUser :one
+select id, name from users where id = @id;
+
+-- name: CountUsers :one
+select count(*) as total from users;

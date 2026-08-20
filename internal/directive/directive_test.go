@@ -42,7 +42,7 @@ func searchUsersParams() []directive.Param {
 // The whole point of the design is that Query.text plus the parameter table is
 // enough, so this walks the real text all the way to the generated Go types.
 func TestParseToTypes(t *testing.T) {
-	root, err := directive.Parse(searchUsersText, searchUsersParams(), directive.Numbered)
+	root, err := directive.Parse(searchUsersText, searchUsersParams(), directive.Dollar)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -95,7 +95,7 @@ type SearchUsersGroupTag struct {
 }
 
 func TestParseStructure(t *testing.T) {
-	root, err := directive.Parse(searchUsersText, searchUsersParams(), directive.Numbered)
+	root, err := directive.Parse(searchUsersText, searchUsersParams(), directive.Dollar)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -129,9 +129,8 @@ func TestParseStructure(t *testing.T) {
 	}
 }
 
-// Positional placeholders are how sqlc emits MySQL and SQLite, and they carry no
-// number of their own.
-func TestParsePositional(t *testing.T) {
+// A bare ? is how sqlc emits MySQL, and it carries no number of its own.
+func TestParseQuestion(t *testing.T) {
 	text := `select id from users
 where 1 = 1
   /*%if activeOnly*/ and status = ? /*%end*/
@@ -139,7 +138,7 @@ where 1 = 1
 	root, err := directive.Parse(text, []directive.Param{
 		{Number: 1, Name: "status"},
 		{Number: 2, Name: "kw"},
-	}, directive.Positional)
+	}, directive.Question)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -151,11 +150,10 @@ where 1 = 1
 	}
 }
 
-// In the numbered dialects a bare "?" is an operator, not a parameter:
-// PostgreSQL uses it to test for a jsonb key.
-func TestParseQuestionMarkIsNotAPlaceholderWhenNumbered(t *testing.T) {
+// Under PostgreSQL a bare "?" is an operator, not a parameter: it tests for a jsonb key.
+func TestParseQuestionMarkIsNotAPlaceholderUnderDollar(t *testing.T) {
 	text := `select id from users where data ? 'k' and status = $1`
-	root, err := directive.Parse(text, []directive.Param{{Number: 1, Name: "status"}}, directive.Numbered)
+	root, err := directive.Parse(text, []directive.Param{{Number: 1, Name: "status"}}, directive.Dollar)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -171,7 +169,7 @@ func TestParseSkipsQuotesAndComments(t *testing.T) {
 -- a line comment with $5 and /*%if y*/
 /** a plain comment with $4 */
 from t where id = $1`
-	root, err := directive.Parse(text, []directive.Param{{Number: 1, Name: "id"}}, directive.Numbered)
+	root, err := directive.Parse(text, []directive.Param{{Number: 1, Name: "id"}}, directive.Dollar)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -199,7 +197,7 @@ func TestParseErrors(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, err := directive.Parse(c.text, nil, directive.Numbered)
+			_, err := directive.Parse(c.text, nil, directive.Dollar)
 			if err == nil {
 				t.Fatalf("want an error containing %q, got nil", c.want)
 			}
@@ -224,5 +222,61 @@ func TestCheckComments(t *testing.T) {
 	}
 	if !strings.Contains(errs[0].Error(), "column zero") {
 		t.Errorf("error = %q, want it to mention column zero", errs[0])
+	}
+}
+
+// sqlc emits ?n for SQLite, which sits between the other two styles: the "?" makes it look
+// positional, and the number makes position wrong. A parameter used twice appears twice
+// with its own number, which is exactly what position cannot express.
+func TestParseQuestionNumbered(t *testing.T) {
+	text := `select id from t
+where 1 = 1
+  /*%if a*/ and x = ?1 /*%end*/
+  /*%if b*/ and y = ?2 and z = ?1 /*%end*/`
+	root, err := directive.Parse(text, []directive.Param{
+		{Number: 1, Name: "one"},
+		{Number: 2, Name: "two"},
+	}, directive.QuestionNumbered)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if b := root.Children[0].Binds; len(b) != 1 || b[0] != "one" {
+		t.Errorf("first branch binds = %v, want [one]", b)
+	}
+	if b := root.Children[1].Binds; len(b) != 2 || b[0] != "two" || b[1] != "one" {
+		t.Errorf("second branch binds = %v, want [two one]", b)
+	}
+}
+
+// ":3" is ordinary PostgreSQL syntax inside an array slice, so a style that reads it as a
+// placeholder breaks a legitimate query. Only $n is a placeholder under Dollar.
+func TestParseDollarLeavesColonsAlone(t *testing.T) {
+	root, err := directive.Parse("select a[1:3] from t where id = $1",
+		[]directive.Param{{Number: 1, Name: "id"}}, directive.Dollar)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if b := root.Binds; len(b) != 1 || b[0] != "id" {
+		t.Errorf("binds = %v, want [id]", b)
+	}
+}
+
+func TestStyleFor(t *testing.T) {
+	for engine, want := range map[string]directive.Style{
+		"postgresql": directive.Dollar,
+		"mysql":      directive.Question,
+		"sqlite":     directive.QuestionNumbered,
+	} {
+		got, err := directive.StyleFor(engine)
+		if err != nil {
+			t.Errorf("StyleFor(%q): %v", engine, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("StyleFor(%q) = %v, want %v", engine, got, want)
+		}
+	}
+	if _, err := directive.StyleFor("oracle"); err == nil {
+		t.Error("StyleFor(oracle): want an error, sqlc has no such engine")
 	}
 }

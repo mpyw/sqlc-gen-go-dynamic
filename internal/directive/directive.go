@@ -30,10 +30,9 @@ type Param struct {
 	Name   string // plugin.Parameter.column.name, e.g. "status" or "c.name"
 }
 
-// Parse recovers the directive tree of a query body. Placeholders are matched to
-// params by number for the numbered dialects ($n, :n, @pn) and by order of
-// appearance for the positional one (?), which is how sqlc emits MySQL and
-// SQLite.
+// Parse recovers the directive tree of a query body. Placeholders are matched to params by
+// the number they carry, except under the one style that carries none, where position
+// decides; see Style.
 func Parse(text string, params []Param, style Style) (*exprtype.Node, error) {
 	byNumber := make(map[int]string, len(params))
 	for _, p := range params {

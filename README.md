@@ -1,4 +1,4 @@
-# sqlc-gen-bisql
+# sqlc-gen-go-dynamic
 
 A [sqlc](https://sqlc.dev) codegen plugin that gives sqlc queries `/*%if*/` and
 `/*%for*/`, so a query with branches keeps sqlc's type safety instead of losing it.
@@ -30,8 +30,8 @@ order by /*%if byName*/ u.name, /*%end*/ u.id;
 sqlc parses that as ordinary SQL — the directives are comments — resolves every
 `@name` against the catalog, and hands the plugin both the typed parameter list
 and the body verbatim. The plugin recovers the branch structure from the comments
-and emits a typed API; at run time [bisql](https://github.com/mpyw/bisql)
-evaluates the directives and renders `(SQL, args)`.
+and emits a typed API; at run time the generated code evaluates the directives and renders
+`(SQL, args)`.
 
 ```go
 type SearchUsersParams struct {
@@ -48,9 +48,28 @@ type SearchUsersCond struct {
 }
 ```
 
-Three layers, and each one does only what it is good at: **sqlc** owns types and
-catalog checking, **the plugin** owns the mapping from branch structure to Go
-types, and **bisql** owns rendering at run time. The plugin is the thin part.
+Three layers, and each does only what it is good at: **sqlc** owns types and catalog
+checking, **the plugin** owns the mapping from branch structure to Go types, and the
+**directive engine** owns rendering at run time. The plugin is the thin part.
+
+## Relationship to bisql
+
+This is a sibling of [bisql](https://github.com/mpyw/bisql), not a client of it. The
+directive semantics come from there — emit verbatim, remove nothing implicitly, let the
+author anchor, number every placeholder off one counter — and the two-way bind syntax was
+where that design started.
+
+The engine is not shared, and deliberately. Trying it as a mode inside bisql cost 422 lines
+added to a 1480-line core, every one of them a conditional for this product, and it ended
+with bisql hardcoding a fact about sqlc's MySQL support. Meanwhile what this needs is a
+strict simplification rather than a fork: no test literals, no `/*^ */` and so no literal
+formatter, no `@include`, no Oracle or SQL Server, and one bind syntax instead of a choice
+between two. Under a thousand lines, with no branches on a mode.
+
+The cost is a second lexer. The shared part — quote and comment scanning, block nesting,
+verbatim emit against one counter — is small and stable, and the parts where bugs live are
+the parts that are not shared. If the same bug ever needs fixing twice, that is when a
+shared core earns its keep.
 
 ## Why not the other designs
 
@@ -58,7 +77,7 @@ types, and **bisql** owns rendering at run time. The plugin is the thin part.
   there is no hook into the frontend, and `GenerateRequest` carries the catalog but
   not the query AST, so a plugin cannot resolve "which column is this literal
   compared against". That needs a fork of sqlc itself.
-- **Keep bisql's 2-way bind syntax** (`/*status*/'active'`). Two-way binding needs a
+- **Keep the 2-way bind syntax** (`/*status*/'active'`). Two-way binding needs a
   literal at the bind site; sqlc needs a parameter marker. No single text is both,
   so bridging them takes a pre-parse rewrite — which is, again, outside the plugin.
   Giving up two-way *for values only* removes the conflict entirely, and the
@@ -72,7 +91,17 @@ types, and **bisql** owns rendering at run time. The plugin is the thin part.
 |---|---|
 | `internal/exprtype` | Infers Go types for the variables that appear only in directive conditions, and refuses — with a reason — the ones it cannot. |
 | `internal/directive` | Recovers the directive tree from `Query.text` and pairs each placeholder with sqlc's parameter name. |
-| _(not written)_ | The codegen itself, and the sqlc plugin entry point. |
+| _(not written)_ | The directive engine, the codegen, and the plugin entry point. |
+
+### `@include` is not here, and cannot be
+
+Fragment inclusion has to happen **upstream of sqlc**, not inside this plugin. A
+`/*%! @include ... */` directive is a comment as far as sqlc is concerned, so the fragment's
+SQL is never analyzed: a bind inside it gets no type, and the runtime would bind a parameter
+the generated code does not know about. Anything sqlc did not see cannot be typed.
+
+So composition belongs to a separate step that expands the templates and hands the result to
+sqlc — useful to plain sqlc users too, and not something a codegen plugin can reach.
 
 ### How a type is decided
 
@@ -126,7 +155,7 @@ stand-in and a pointer buys nothing.
 - **Cast a bind used in a row comparison or an array context.** sqlc mistypes
   `(a, b) = ($1, $2)` — it gives `$2` the type of `a` — and marks a bind under
   `= any(...)` or `array[...]` as an array. `sqlc.arg('x')::text` fixes both. For
-  row comparisons the better fix is bisql's usual anchored list: a `1 = 0` seed
+  row comparisons the better fix is the usual anchored list: a `1 = 0` seed
   with one `or (a = @x and b = @y)` per element, which types correctly with no
   casts at all.
 - **Keep the select list static.** Toggling a column changes the row struct, and

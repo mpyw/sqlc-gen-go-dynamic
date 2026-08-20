@@ -184,3 +184,23 @@ func TestFileCollectsImports(t *testing.T) {
 		}
 	}
 }
+
+// An override has already decided the type, so nothing is added to it: pgtype.Timestamptz
+// asked for by name must not arrive as *pgtype.Timestamptz.
+func TestFileLeavesAnOverriddenTypeAlone(t *testing.T) {
+	in := searchUsers()
+	in.Row = append(in.Row,
+		query.Column{Name: "seen_at", GoType: "pgtype.Timestamptz",
+			Import: "github.com/jackc/pgx/v5/pgtype", Explicit: true},
+		query.Column{Name: "note", GoType: "string"}, // nullable and not overridden
+	)
+	out, err := gen.File(gen.Options{Package: "db", SQLPackage: "pgx/v5"}, []*query.Query{prepare(t, in)})
+	if err != nil {
+		t.Fatalf("gen: %v", err)
+	}
+	for _, want := range []string{"SeenAt pgtype.Timestamptz", "Note   *string"} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+}

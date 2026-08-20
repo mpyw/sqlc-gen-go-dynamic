@@ -298,13 +298,34 @@ than aimed at a string that may not scan; `interval`, `inet` and `cidr` are the 
 **These are not sqlc's own types.** A nullable column is a pointer here where that codegen
 emits `sql.NullString` or `pgtype.Text`. A pointer scans correctly under both drivers, so the
 generated code is right, but it is not the same API — parity belongs to the fork that takes
-over sqlc's type table, not to a second table written from guesses. What `gotype` will not do
-is invent an entry: an unknown type is a build error naming the type, because a guess
-compiles.
+over sqlc's type table, not to a second table written from guesses.
+
+The table is small, and plenty is missing: `money`, `bit`, `xml`, `macaddr`, `oid`, the
+geometric and range types, `hstore`, and enums, which sqlc turns into named Go types of their
+own. What `gotype` will not do is invent an entry — an unknown type is a build error naming
+it, because a guess compiles. `overrides` is what makes that survivable, and it takes the same
+shape as sqlc's:
+
+```yaml
+options:
+  overrides:
+    - db_type: money
+      go_type: github.com/jackc/pgx/v5/pgtype.Numeric
+    - db_type: timestamptz
+      nullable: true
+      go_type: github.com/jackc/pgx/v5/pgtype.Timestamptz
+```
+
+An override decides the type outright: nothing is added to it, so `pgtype.Timestamptz` asked
+for by name does not arrive as `*pgtype.Timestamptz`.
 
 ## Development
 
 ```bash
-mise run check   # fmt, build, vet, test, and the example module
-go test ./internal/gen -run TestGolden -update   # regenerate the example
+mise run check     # fmt, build, vet, lint, deadcode, test -race
+mise run example   # the example module: compiles and runs the generated code
+mise run sqlc      # real sqlc, real generation, real compilation
+mise run cover     # coverage.out
+
+go test ./internal/gen -run TestGolden -update   # regenerate the example's golden files
 ```

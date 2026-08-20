@@ -1,0 +1,12 @@
+# Coverage is informational: it never fails CI (thresholds off), it only reports.
+coverage:
+  status:
+    project:
+      default:
+        informational: true
+    patch:
+      default:
+        informational: true
+
+ignore:
+  - "testdata"

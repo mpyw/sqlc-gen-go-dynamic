@@ -27,6 +27,7 @@ type Param struct {
 	Name     string
 	GoType   string
 	Import   string // the package GoType needs, empty for a builtin
+	Explicit bool   // the type came from an override, so nothing is added to it
 	NotNull  bool
 	IsSlice  bool
 	Nullable bool // written as sqlc.narg; indistinguishable from a nullable column in the request
@@ -36,11 +37,12 @@ type Param struct {
 // it, which is what sqlc.embed reports; sqlc has already expanded the call into the column
 // list by then, so the name is all that is left of it.
 type Column struct {
-	Name    string
-	GoType  string
-	Import  string // the package GoType needs, empty for a builtin
-	NotNull bool
-	Embed   string
+	Name     string
+	GoType   string
+	Import   string // the package GoType needs, empty for a builtin
+	Explicit bool   // the type came from an override, so nothing is added to it
+	NotNull  bool
+	Embed    string
 }
 
 // Input is one query as sqlc reports it.
@@ -133,7 +135,12 @@ func restoreParams(ps []Param) []placeholder.Param {
 func typeParams(ps []Param) []exprtype.SQLParam {
 	out := make([]exprtype.SQLParam, len(ps))
 	for i, p := range ps {
-		out[i] = exprtype.SQLParam{Name: p.Name, GoType: p.GoType, NotNull: p.NotNull}
+		out[i] = exprtype.SQLParam{
+			Name:     p.Name,
+			GoType:   p.GoType,
+			Explicit: p.Explicit,
+			NotNull:  p.NotNull,
+		}
 	}
 	return out
 }

@@ -12,9 +12,10 @@ import (
 
 // SQLParam is one entry of sqlc's parameter table, already mapped to a Go type.
 type SQLParam struct {
-	Name    string // sqlc's column name: "status", or "c.name" from sqlc.arg('c.name')
-	GoType  string // "string", "int64", "time.Time", ...
-	NotNull bool   // false for sqlc.narg() and for a nullable column alike
+	Name     string // sqlc's column name: "status", or "c.name" from sqlc.arg('c.name')
+	GoType   string // "string", "int64", "time.Time", ...
+	Explicit bool   // from an override: rendered as written, with no pointer added
+	NotNull  bool   // false for sqlc.narg() and for a nullable column alike
 }
 
 // Diagnostic is something codegen must not silently guess about.
@@ -98,7 +99,7 @@ func (in *inferrer) bind(n ast.Bind) {
 		target = t.elem()
 	}
 	in.unify(target, kindOfGoType(p.GoType), "sqlc parameter", n.Name)
-	target.GoType = p.GoType
+	target.GoType, target.Explicit = p.GoType, p.Explicit
 
 	// Follow sqlc verbatim on nullability. NotNull is false for both sqlc.narg('x') and a
 	// plain sqlc.arg('x') against a nullable column — the request does not distinguish them

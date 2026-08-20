@@ -3,7 +3,10 @@
 A [sqlc](https://sqlc.dev) codegen plugin that gives sqlc queries `/*%if*/` and
 `/*%for*/`, so a query with branches keeps sqlc's type safety instead of losing it.
 
-**Status: v0, exploratory.** Two of the four pieces exist. Nothing generates code yet.
+**Status: v0, exploratory.** It generates code, and the generated code compiles and runs —
+see [`testdata/example`](testdata/example), a separate module so the go tool builds and
+executes it rather than a test only comparing text. What is missing is the plugin entry
+point, so nothing is wired to sqlc yet.
 
 ## The problem
 
@@ -97,7 +100,9 @@ shared core earns its keep.
 | `internal/exprlang` | The expression evaluator, for conditions and iterables only. A marker is a name, not an expression. |
 | `internal/dialect` | Placeholder generation for the three engines sqlc supports. |
 | `internal/lint` | The mistakes sqlc accepts and this cannot. |
-| _(not written)_ | The codegen and the plugin entry point. |
+| `internal/gen` | Emits the Go source: the template constant, the parameter and row types, the method. |
+| `dyn` | The runtime the generated code calls. The only public package. |
+| _(not written)_ | The plugin entry point, and the surrounding package sqlc's own Go codegen emits. |
 
 ### One text, one parser
 
@@ -205,3 +210,54 @@ that shaped the design:
   manage: one pass types every branch.
 - `not_null` is false for `sqlc.narg()` and for a nullable column alike; the two
   are indistinguishable in the request.
+
+## What is generated
+
+```go
+const searchUsersSQL = `select u.id, u.name
+from users u
+where 1 = 1
+  /*%if activeOnly*/ and u.status = sqlc.arg('status') /*%end*/
+  /*%if ids != null*/ and u.id in (sqlc.slice('ids')) /*%end*/
+  /*%for c in conds*/ and (u.name like sqlc.arg('c.name')) /*%end*/
+order by /*%if byName*/ u.name, /*%end*/ u.id`
+
+var searchUsersTemplate = dyn.MustParse(searchUsersSQL, "postgresql")
+
+type SearchUsersParams struct {
+	ActiveOnly bool
+	Status     string
+	MinAge     *int32
+	Ids        []int64
+	Conds      []SearchUsersCond
+	ByName     bool
+}
+
+// TemplateScope names the fields as the template does.
+func (p SearchUsersParams) TemplateScope() map[string]any {
+	return map[string]any{
+		"activeOnly": p.ActiveOnly,
+		"status":     p.Status,
+		"minAge":     p.MinAge,
+		"min_age":    p.MinAge,
+		...
+	}
+}
+```
+
+The constant is the text sqlc analyzed with its markers restored, so what runs is what sqlc
+checked. `TemplateScope` is keyed by every spelling the template used, because only the
+generator knows both sides: a condition writes `minAge` where the marker beside it writes
+`min_age`.
+
+`MinAge` is a pointer for one reason — the condition nil-tests it, so unset has to be
+distinguishable from zero or the branch decision is wrong. `ActiveOnly` and `Status` are
+values even though both sit inside branches: when a branch does not render, nothing reads the
+value.
+
+## Development
+
+```bash
+mise run check   # fmt, build, vet, test, and the example module
+go test ./internal/gen -run TestGolden -update   # regenerate the example
+```

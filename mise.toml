@@ -1,0 +1,32 @@
+[tools]
+go = "1.25.3"
+
+[tasks.fmt]
+description = "Check formatting (gofmt)"
+run = '''
+files=$(gofmt -l .)
+if [ -n "$files" ]; then echo "gofmt needed on:"; echo "$files"; exit 1; fi
+'''
+
+[tasks.build]
+description = "Build all packages"
+run = 'go build ./...'
+
+[tasks.vet]
+description = "go vet"
+run = 'go vet ./...'
+
+[tasks.test]
+description = "Run tests with the race detector"
+run = 'go test -race ./...'
+
+# The example is a separate module (testdata/example, joined via go.work) so that the
+# generated file is compiled and run by the go tool rather than only compared as text.
+[tasks.example]
+description = "Build and test the example module"
+dir = "testdata/example"
+run = 'go build ./... && go vet ./... && go test -race ./...'
+
+[tasks.check]
+description = "Full gate: fmt, build, vet, test, example"
+depends = ["fmt", "build", "vet", "test", "example"]

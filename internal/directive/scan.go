@@ -6,15 +6,36 @@ import (
 	"strings"
 )
 
-// Style says how sqlc spelled the placeholders it substituted, which decides
-// whether a "?" in the text is a parameter or just an operator: PostgreSQL's
-// jsonb "?" would otherwise be mistaken for one.
+// Style is how sqlc spelled the placeholders it substituted. There is one per engine sqlc
+// supports, and they have to be told apart rather than accepted together: a bare "?" is an
+// operator in PostgreSQL — it tests for a jsonb key — and ":3" is ordinary syntax there too,
+// inside an array slice like a[1:3].
 type Style uint8
 
 const (
-	Numbered   Style = iota // $n, :n, @pn — PostgreSQL, Oracle, SQL Server
-	Positional              // ? — MySQL, SQLite
+	// Dollar is $n, which sqlc emits for PostgreSQL.
+	Dollar Style = iota
+	// Question is a bare ?, which sqlc emits for MySQL. Position decides which parameter
+	// it is, since it carries no number.
+	Question
+	// QuestionNumbered is ?n, which sqlc emits for SQLite. The number matters: a parameter
+	// used twice appears twice with the same number, which position alone cannot express.
+	QuestionNumbered
 )
+
+// StyleFor returns the style sqlc uses for an engine, as plugin.Request.settings.engine
+// names it.
+func StyleFor(engine string) (Style, error) {
+	switch engine {
+	case "postgresql":
+		return Dollar, nil
+	case "mysql":
+		return Question, nil
+	case "sqlite":
+		return QuestionNumbered, nil
+	}
+	return 0, fmt.Errorf("unsupported engine %q", engine)
+}
 
 type tokenKind uint8
 
@@ -59,25 +80,19 @@ func (s *scanner) next() (token, bool) {
 				return token{kind: tokDirective, text: body[1:], pos: start}, true
 			}
 
-		case s.style == Numbered && c == '$':
+		case s.style == Dollar && c == '$':
 			if n, ok := s.readNumberAfter(1); ok {
 				return token{kind: tokPlaceholder, number: n, pos: s.i - 1}, true
 			}
 			s.i++
 
-		case s.style == Numbered && c == ':':
+		case s.style == QuestionNumbered && c == '?':
 			if n, ok := s.readNumberAfter(1); ok {
 				return token{kind: tokPlaceholder, number: n, pos: s.i - 1}, true
 			}
 			s.i++
 
-		case s.style == Numbered && c == '@' && s.peek(1) == 'p':
-			if n, ok := s.readNumberAfter(2); ok {
-				return token{kind: tokPlaceholder, number: n, pos: s.i - 1}, true
-			}
-			s.i++
-
-		case s.style == Positional && c == '?':
+		case s.style == Question && c == '?':
 			s.i++
 			return token{kind: tokPlaceholder, number: 0, pos: s.i - 1}, true
 

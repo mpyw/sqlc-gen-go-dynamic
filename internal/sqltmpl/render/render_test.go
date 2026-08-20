@@ -245,3 +245,40 @@ func indexOf(s, sub string) int {
 	}
 	return -1
 }
+
+// A condition reaching into a loop element needs the element in the scope by the template's
+// spelling: the expression language resolves a member by its exact Go field name, so
+// c.enabled would not find Enabled.
+func TestRenderConditionOnStructElement(t *testing.T) {
+	type cond struct {
+		Enabled bool
+		Name    string
+	}
+	res := build(t,
+		"select 1/*%for c in conds*//*%if c.enabled*/ and n = sqlc.arg('c.name')/*%end*//*%end*/",
+		map[string]any{"conds": []cond{
+			{Enabled: true, Name: "ada"},
+			{Enabled: false, Name: "skipped"},
+			{Enabled: true, Name: "bob"},
+		}},
+		dialect.PostgreSQL)
+	if want := "select 1 and n = $1 and n = $2"; res.SQL != want {
+		t.Errorf("SQL\n got: %q\nwant: %q", res.SQL, want)
+	}
+	if want := []any{"ada", "bob"}; !reflect.DeepEqual(res.Args, want) {
+		t.Errorf("Args = %#v, want %#v", res.Args, want)
+	}
+}
+
+// A nested slice inside a struct element still iterates.
+func TestRenderNestedStructElements(t *testing.T) {
+	type tag struct{ Value string }
+	type group struct{ Tags []tag }
+	res := build(t,
+		"select 1/*%for g in groups*//*%for t in g.tags*/ and v = sqlc.arg('t.value')/*%end*//*%end*/",
+		map[string]any{"groups": []group{{Tags: []tag{{"x"}, {"y"}}}}},
+		dialect.PostgreSQL)
+	if want := []any{"x", "y"}; !reflect.DeepEqual(res.Args, want) {
+		t.Errorf("Args = %#v, want %#v", res.Args, want)
+	}
+}

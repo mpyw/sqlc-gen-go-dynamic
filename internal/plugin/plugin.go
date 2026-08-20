@@ -72,10 +72,11 @@ type Identifier struct {
 // Go codegen where they mean the same thing, so a project switching over does not rewrite
 // them.
 type Options struct {
-	Package    string `json:"package"`
-	SQLPackage string `json:"sql_package"`
-	Filename   string `json:"filename"`
-	Runtime    string `json:"runtime"`
+	Package    string           `json:"package"`
+	SQLPackage string           `json:"sql_package"`
+	Filename   string           `json:"filename"`
+	Runtime    string           `json:"runtime"`
+	Overrides  gotype.Overrides `json:"overrides"`
 }
 
 // Response is sqlc's GenerateResponse.
@@ -115,7 +116,7 @@ func Generate(req Request) (Response, error) {
 
 	queries := make([]*query.Query, 0, len(req.Queries))
 	for _, q := range sortedQueries(req.Queries) {
-		in, err := input(req.Settings.Engine, opts.SQLPackage, q)
+		in, err := input(req.Settings.Engine, opts, q)
 		if err != nil {
 			return Response{}, err
 		}
@@ -142,7 +143,7 @@ func Generate(req Request) (Response, error) {
 
 // input converts one query, resolving every Go type up front so that an unmapped one is
 // reported against the query that needs it.
-func input(engine, sqlPackage string, q Query) (query.Input, error) {
+func input(engine string, opts Options, q Query) (query.Input, error) {
 	in := query.Input{
 		Name:     q.Name,
 		Cmd:      q.Cmd,
@@ -151,17 +152,26 @@ func input(engine, sqlPackage string, q Query) (query.Input, error) {
 		Engine:   engine,
 	}
 	for _, p := range q.Params {
-		t, err := gotype.For(engine, sqlPackage, p.Column.Type.Name, p.Column.IsArray, p.Column.ArrayDims)
+		t, err := gotype.For(gotype.Request{
+			Engine:     engine,
+			SQLPackage: opts.SQLPackage,
+			Name:       p.Column.Type.Name,
+			NotNull:    p.Column.NotNull,
+			IsArray:    p.Column.IsArray,
+			ArrayDims:  p.Column.ArrayDims,
+			Overrides:  opts.Overrides,
+		})
 		if err != nil {
 			return query.Input{}, fmt.Errorf("%s: parameter %s: %w", q.Name, p.Column.Name, err)
 		}
 		in.Params = append(in.Params, query.Param{
-			Number:  p.Number,
-			Name:    p.Column.Name,
-			GoType:  t.Name,
-			Import:  t.Import,
-			NotNull: p.Column.NotNull,
-			IsSlice: p.Column.IsSqlcSlice,
+			Number:   p.Number,
+			Name:     p.Column.Name,
+			GoType:   t.Name,
+			Import:   t.Import,
+			Explicit: t.Explicit,
+			NotNull:  p.Column.NotNull,
+			IsSlice:  p.Column.IsSqlcSlice,
 			// sqlc reports the same not_null for sqlc.narg and for a nullable column, so the
 			// marker restored is the plain one; the nullable Go type comes from NotNull either
 			// way.
@@ -174,11 +184,19 @@ func input(engine, sqlPackage string, q Query) (query.Input, error) {
 			in.Row = append(in.Row, col)
 			continue
 		}
-		t, err := gotype.For(engine, sqlPackage, c.Type.Name, c.IsArray, c.ArrayDims)
+		t, err := gotype.For(gotype.Request{
+			Engine:     engine,
+			SQLPackage: opts.SQLPackage,
+			Name:       c.Type.Name,
+			NotNull:    c.NotNull,
+			IsArray:    c.IsArray,
+			ArrayDims:  c.ArrayDims,
+			Overrides:  opts.Overrides,
+		})
 		if err != nil {
 			return query.Input{}, fmt.Errorf("%s: column %s: %w", q.Name, c.Name, err)
 		}
-		col.GoType, col.Import = t.Name, t.Import
+		col.GoType, col.Import, col.Explicit = t.Name, t.Import, t.Explicit
 		in.Row = append(in.Row, col)
 	}
 	return in, nil

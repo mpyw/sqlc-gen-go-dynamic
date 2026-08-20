@@ -252,3 +252,13 @@ func TestInferRecordsEverySpelling(t *testing.T) {
 		t.Errorf("Name = %q, want the snake spelling for Go naming", members[0].Name)
 	}
 }
+
+// The same rule for a parameter: an overridden type is rendered as written, even where
+// nullability would otherwise add a pointer.
+func TestInferLeavesAnOverriddenTypeAlone(t *testing.T) {
+	out := declare(t, "/*%if minAge != null*/a = @min_age/*%end*/",
+		exprtype.SQLParam{Name: "min_age", GoType: "pgtype.Timestamptz", Explicit: true})
+	if !strings.Contains(out, "MinAge pgtype.Timestamptz") {
+		t.Errorf("want the type as written, got:\n%s", out)
+	}
+}

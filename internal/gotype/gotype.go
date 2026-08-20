@@ -20,6 +20,10 @@ import "fmt"
 type Type struct {
 	Name   string // as written in source, e.g. "int64" or "time.Time"
 	Import string // the package it needs, empty for a builtin
+	// Explicit marks a type that came from an override. Nothing is added to such a type —
+	// no pointer for a nullable column — because the author has already decided what it is,
+	// and pgtype.Timestamptz asked for by name should not arrive as *pgtype.Timestamptz.
+	Explicit bool
 }
 
 // The catalog reports a type by whichever spelling it was written with, so the abbreviations
@@ -103,9 +107,29 @@ var pgxOverlay = map[string]Type{
 
 const pgtypeImport = "github.com/jackc/pgx/v5/pgtype"
 
-// For resolves a catalog type name for an engine and driver. A pg_catalog-qualified name
-// arrives with its schema attached; the schema carries no information the table needs.
-func For(engine, sqlPackage, name string, isArray bool, arrayDims int) (Type, error) {
+// Request is one type to resolve.
+type Request struct {
+	Engine     string
+	SQLPackage string
+	Name       string // the catalog type name, schema-qualified or not
+	NotNull    bool
+	IsArray    bool
+	ArrayDims  int
+	Overrides  Overrides
+}
+
+// For resolves a catalog type. An override wins over the built-in table, which is what keeps
+// a type the table does not know from being a blocker. A pg_catalog-qualified name arrives
+// with its schema attached; the schema carries no information either lookup needs.
+func For(r Request) (Type, error) {
+	bare := unqualify(r.Name)
+	if t, ok := r.Overrides.find(bare, r.NotNull); ok {
+		return array(t, r.IsArray, r.ArrayDims), nil
+	}
+	return builtin(r.Engine, r.SQLPackage, bare, r.IsArray, r.ArrayDims)
+}
+
+func builtin(engine, sqlPackage, bare string, isArray bool, arrayDims int) (Type, error) {
 	table, ok := map[string]map[string]Type{
 		"postgresql": postgres,
 		"mysql":      mysql,
@@ -114,7 +138,6 @@ func For(engine, sqlPackage, name string, isArray bool, arrayDims int) (Type, er
 	if !ok {
 		return Type{}, fmt.Errorf("gotype: unsupported engine %q", engine)
 	}
-	bare := unqualify(name)
 	t, ok := table[bare]
 	if pgx(sqlPackage) {
 		if over, has := pgxOverlay[bare]; has {
@@ -122,18 +145,23 @@ func For(engine, sqlPackage, name string, isArray bool, arrayDims int) (Type, er
 		}
 	}
 	if !ok {
-		return Type{}, fmt.Errorf("gotype: %s with %s has no mapping for %q",
-			engine, driverName(sqlPackage), name)
+		return Type{}, fmt.Errorf("gotype: %s with %s has no mapping for %q; "+
+			"add an override for it", engine, driverName(sqlPackage), bare)
 	}
-	if isArray {
-		if arrayDims < 1 {
-			arrayDims = 1
-		}
-		for i := 0; i < arrayDims; i++ {
-			t.Name = "[]" + t.Name
-		}
+	return array(t, isArray, arrayDims), nil
+}
+
+func array(t Type, isArray bool, dims int) Type {
+	if !isArray {
+		return t
 	}
-	return t, nil
+	if dims < 1 {
+		dims = 1
+	}
+	for i := 0; i < dims; i++ {
+		t.Name = "[]" + t.Name
+	}
+	return t
 }
 
 func pgx(sqlPackage string) bool {

@@ -156,7 +156,7 @@ func GoType(t *Type) string {
 			base = "any"
 		}
 	}
-	if t.Optional {
+	if t.Optional && !t.Explicit {
 		return "*" + base
 	}
 	return base

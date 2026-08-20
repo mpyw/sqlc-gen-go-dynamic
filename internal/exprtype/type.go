@@ -93,6 +93,7 @@ type Type struct {
 	Constraints Constraint
 	Optional    bool   // nil-tested in a condition, or nullable per sqlc
 	GoType      string // set when sqlc supplied a concrete Go type
+	Explicit    bool   // GoType came from an override: rendered as written
 	Elem        *Type  // Slice
 	Name        string // Struct: generated type name, filled in by naming
 

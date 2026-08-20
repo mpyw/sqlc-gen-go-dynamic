@@ -121,6 +121,20 @@ func snake(s string) string {
 	return b.String()
 }
 
+// elementScope prepares a loop element for the scope. A struct has to become a Scope: the
+// expression language resolves a member by its exact Go field name, so a condition reading
+// c.enabled would not find Enabled. Anything else is used as it is.
+func elementScope(v any) any {
+	switch v.(type) {
+	case nil, Scope, map[string]any:
+		return v
+	}
+	if sc, err := scopeOf(v); err == nil {
+		return sc
+	}
+	return v
+}
+
 // lookup resolves a dotted path: a scope entry, then a field of whatever it found.
 func lookup(sc Scope, path string) (any, bool) {
 	head, rest, _ := strings.Cut(path, ".")
@@ -137,6 +151,18 @@ func lookup(sc Scope, path string) (any, bool) {
 	return v, true
 }
 
+// asMap unwraps the two map forms a scope entry can hold: a Scope, from a converted loop
+// element, and a plain map, from a caller.
+func asMap(v any) (map[string]any, bool) {
+	switch m := v.(type) {
+	case Scope:
+		return m, true
+	case map[string]any:
+		return m, true
+	}
+	return nil, false
+}
+
 func entry(sc Scope, name string) (any, bool) {
 	if v, ok := sc[name]; ok {
 		return v, true
@@ -147,7 +173,7 @@ func entry(sc Scope, name string) (any, bool) {
 
 // field reads a member of v, matching a folded name so that name finds Name.
 func field(v any, name string) (any, bool) {
-	if m, ok := v.(map[string]any); ok {
+	if m, ok := asMap(v); ok {
 		if e, ok := m[name]; ok {
 			return e, true
 		}

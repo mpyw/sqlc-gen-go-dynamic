@@ -143,7 +143,7 @@ func (r *renderer) loop(n ast.For, sc Scope) error {
 		inner[k] = e
 	}
 	for _, e := range elems {
-		inner[n.Var] = e
+		inner[n.Var] = elementScope(e)
 		if err := r.nodes(n.Body, inner); err != nil {
 			return err
 		}

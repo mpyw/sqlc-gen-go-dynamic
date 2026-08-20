@@ -102,7 +102,8 @@ type Type struct {
 }
 
 type field struct {
-	name string // display name, preferring snake_case when both spellings are seen
+	name string   // display name, preferring snake_case when both spellings are seen
+	seen []string // every spelling the template named it by, in first-seen order
 	typ  *Type
 }
 
@@ -126,10 +127,13 @@ func (t *Type) field(name string) *Type {
 		if strings.Contains(name, "_") && !strings.Contains(f.name, "_") {
 			f.name = name
 		}
+		if !contains(f.seen, name) {
+			f.seen = append(f.seen, name)
+		}
 		return f.typ
 	}
 	ft := &Type{}
-	t.fields[key] = &field{name: name, typ: ft}
+	t.fields[key] = &field{name: name, seen: []string{name}, typ: ft}
 	t.order = append(t.order, key)
 	return ft
 }
@@ -142,10 +146,22 @@ func (t *Type) elem() *Type {
 	return t.Elem
 }
 
-// Member is one field of a struct type.
+// Member is one field of a struct type. Spellings lists every name the template used for it,
+// which is what a generated scope has to be keyed by: a condition may write minAge while the
+// marker beside it writes min_age, and both have to resolve.
 type Member struct {
-	Name string
-	Type *Type
+	Name      string
+	Spellings []string
+	Type      *Type
+}
+
+func contains(ss []string, s string) bool {
+	for _, e := range ss {
+		if e == s {
+			return true
+		}
+	}
+	return false
 }
 
 // Fields returns the struct's members in first-seen order.
@@ -153,7 +169,7 @@ func (t *Type) Fields() []Member {
 	out := make([]Member, 0, len(t.order))
 	for _, k := range t.order {
 		f := t.fields[k]
-		out = append(out, Member{Name: f.name, Type: f.typ})
+		out = append(out, Member{Name: f.name, Spellings: f.seen, Type: f.typ})
 	}
 	return out
 }

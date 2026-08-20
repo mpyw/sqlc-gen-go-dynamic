@@ -1,6 +1,7 @@
 package exprtype_test
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -228,5 +229,26 @@ func TestGoName(t *testing.T) {
 		if got := exprtype.GoName(in); got != want {
 			t.Errorf("GoName(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// A generated scope has to be keyed by every spelling the template used, since a condition
+// may write minAge while the marker beside it writes min_age.
+func TestInferRecordsEverySpelling(t *testing.T) {
+	got, diags := infer(t, "/*%if minAge != null*/a = @min_age/*%end*/",
+		exprtype.SQLParam{Name: "min_age", GoType: "int32", NotNull: true})
+	if len(diags) != 0 {
+		t.Fatalf("unexpected diagnostics: %v", diags)
+	}
+	members := got.Fields()
+	if len(members) != 1 {
+		t.Fatalf("fields = %v, want one", members)
+	}
+	want := []string{"minAge", "min_age"}
+	if !reflect.DeepEqual(members[0].Spellings, want) {
+		t.Errorf("Spellings = %q, want %q", members[0].Spellings, want)
+	}
+	if members[0].Name != "min_age" {
+		t.Errorf("Name = %q, want the snake spelling for Go naming", members[0].Name)
 	}
 }

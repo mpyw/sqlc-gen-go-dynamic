@@ -69,6 +69,19 @@ func goType(req *plugin.GenerateRequest, options *opts.Options, col *plugin.Colu
 	return typ
 }
 
+// overridden reports whether the column's Go type came from an override, which means it is
+// rendered as written and nothing — no pointer for a nil test — is added to it. It is decided by
+// asking what the type would be without the overrides rather than by re-implementing the
+// matching, which has three separate forms and would drift.
+func overridden(req *plugin.GenerateRequest, options *opts.Options, col *plugin.Column) bool {
+	if len(options.Overrides) == 0 {
+		return false
+	}
+	bare := *options
+	bare.Overrides = nil
+	return goType(req, options, col) != goType(req, &bare, col)
+}
+
 func goInnerType(req *plugin.GenerateRequest, options *opts.Options, col *plugin.Column) string {
 	// package overrides have a higher precedence
 	for _, override := range options.Overrides {

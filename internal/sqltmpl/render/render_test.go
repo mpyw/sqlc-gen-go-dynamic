@@ -2,6 +2,7 @@ package render_test
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/mpyw/sqlc-gen-go-dynamic/internal/bind"
@@ -227,24 +228,11 @@ func TestRenderErrors(t *testing.T) {
 			if err == nil {
 				t.Fatalf("want an error containing %q, got nil", c.want)
 			}
-			if !contains(err.Error(), c.want) {
+			if !strings.Contains(err.Error(), c.want) {
 				t.Errorf("error = %q, want it to contain %q", err, c.want)
 			}
 		})
 	}
-}
-
-func contains(s, sub string) bool {
-	return len(sub) == 0 || (len(s) >= len(sub) && indexOf(s, sub) >= 0)
-}
-
-func indexOf(s, sub string) int {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
-	}
-	return -1
 }
 
 // A condition reaching into a loop element needs the element in the scope by the template's

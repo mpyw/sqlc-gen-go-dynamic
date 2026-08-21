@@ -34,7 +34,7 @@ func (q *Queries) {{.MethodName}}(ctx context.Context, db DBTX, {{.Arg.Pair}}) (
 	var {{.Ret.Name}} {{.Ret.Type}}
 	stmt, err := {{.TemplateVar}}.Build(arg)
 	if err != nil {
-		return {{.Ret.ReturnName}}, err
+		return {{.Ret.ReturnName}}, {{if $.WrapErrors}}fmt.Errorf("query {{.MethodName}}: %w", err){{else}}err{{end}}
 	}
 	row := db.QueryRowContext(ctx, stmt.SQL, stmt.Args...)
 {{- else -}}
@@ -42,7 +42,7 @@ func (q *Queries) {{.MethodName}}(ctx context.Context, {{.Arg.Pair}}) ({{.Ret.De
 	var {{.Ret.Name}} {{.Ret.Type}}
 	stmt, err := {{.TemplateVar}}.Build(arg)
 	if err != nil {
-		return {{.Ret.ReturnName}}, err
+		return {{.Ret.ReturnName}}, {{if $.WrapErrors}}fmt.Errorf("query {{.MethodName}}: %w", err){{else}}err{{end}}
 	}
 	row := q.db.QueryRowContext(ctx, stmt.SQL, stmt.Args...)
 {{- end}}
@@ -54,7 +54,7 @@ func (q *Queries) {{.MethodName}}(ctx context.Context, {{.Arg.Pair}}) ({{.Ret.De
 	{{- end}}
 	return {{.Ret.ReturnName}}, err
 }
-{{else}}
+{{else -}}
 func (q *Queries) {{.MethodName}}(ctx context.Context, {{ dbarg }} {{.Arg.Pair}}) ({{.Ret.DefineType}}, error) {
     {{- template "queryCodeStdExec" . }}
 	{{- if or (ne .Arg.Pair .Ret.Pair) (ne .Arg.DefineType .Ret.DefineType) }}
@@ -79,14 +79,14 @@ func (q *Queries) {{.MethodName}}(ctx context.Context, {{ dbarg }} {{.Arg.Pair}}
 func (q *Queries) {{.MethodName}}(ctx context.Context, db DBTX, {{.Arg.Pair}}) ([]{{.Ret.DefineType}}, error) {
 	stmt, err := {{.TemplateVar}}.Build(arg)
 	if err != nil {
-		return nil, err
+		return nil, {{if $.WrapErrors}}fmt.Errorf("query {{.MethodName}}: %w", err){{else}}err{{end}}
 	}
 	rows, err := db.QueryContext(ctx, stmt.SQL, stmt.Args...)
 {{- else -}}
 func (q *Queries) {{.MethodName}}(ctx context.Context, {{.Arg.Pair}}) ([]{{.Ret.DefineType}}, error) {
 	stmt, err := {{.TemplateVar}}.Build(arg)
 	if err != nil {
-		return nil, err
+		return nil, {{if $.WrapErrors}}fmt.Errorf("query {{.MethodName}}: %w", err){{else}}err{{end}}
 	}
 	rows, err := q.db.QueryContext(ctx, stmt.SQL, stmt.Args...)
 {{- end}}
@@ -114,7 +114,7 @@ func (q *Queries) {{.MethodName}}(ctx context.Context, {{.Arg.Pair}}) ([]{{.Ret.
 	}
 	return items, nil
 }
-{{else}}
+{{else -}}
 func (q *Queries) {{.MethodName}}(ctx context.Context, {{ dbarg }} {{.Arg.Pair}}) ([]{{.Ret.DefineType}}, error) {
     {{- template "queryCodeStdExec" . }}
     if err != nil {
@@ -152,14 +152,14 @@ func (q *Queries) {{.MethodName}}(ctx context.Context, {{ dbarg }} {{.Arg.Pair}}
 func (q *Queries) {{.MethodName}}(ctx context.Context, db DBTX, {{.Arg.Pair}}) error {
 	stmt, err := {{.TemplateVar}}.Build(arg)
 	if err != nil {
-		return err
+		return {{if $.WrapErrors}}fmt.Errorf("query {{.MethodName}}: %w", err){{else}}err{{end}}
 	}
 	_, err = db.ExecContext(ctx, stmt.SQL, stmt.Args...)
 {{- else -}}
 func (q *Queries) {{.MethodName}}(ctx context.Context, {{.Arg.Pair}}) error {
 	stmt, err := {{.TemplateVar}}.Build(arg)
 	if err != nil {
-		return err
+		return {{if $.WrapErrors}}fmt.Errorf("query {{.MethodName}}: %w", err){{else}}err{{end}}
 	}
 	_, err = q.db.ExecContext(ctx, stmt.SQL, stmt.Args...)
 {{- end}}
@@ -172,7 +172,7 @@ func (q *Queries) {{.MethodName}}(ctx context.Context, {{.Arg.Pair}}) error {
 	return err
 	{{- end }}
 }
-{{else}}
+{{else -}}
 func (q *Queries) {{.MethodName}}(ctx context.Context, {{ dbarg }} {{.Arg.Pair}}) error {
     {{- template "queryCodeStdExec" . }}
     {{- if $.WrapErrors}}

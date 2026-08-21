@@ -1,7 +1,6 @@
 package exprtype_test
 
 import (
-	"reflect"
 	"strings"
 	"testing"
 
@@ -68,19 +67,31 @@ func TestInferConditionShapes(t *testing.T) {
 	}
 }
 
-// Optionality has exactly two sources, and being inside a branch is not one of them: when
-// the branch does not render, nothing reads the value.
+// A nil test in a condition is the one source of optionality this adds. Being inside a branch
+// is not one: when the branch does not render, nothing reads the value. Nor is a nullable
+// column — sqlc has already chosen a type that expresses absence, and adding a pointer on top
+// of it gave the dynamic query a different type from the static one beside it.
 func TestInferOptionalitySources(t *testing.T) {
 	src := "/*%if activeOnly*/a = @status/*%end*/" + // NOT NULL, no nil test: a value
 		"/*%if minAge != null*/b = @min_age/*%end*/" + // nil-tested: unset must differ from zero
-		"/*%if withNote*/c = @note/*%end*/" // nullable per sqlc
+		"/*%if withNote*/c = @note/*%end*/" + // nullable, so sqlc's own type says so
+		"/*%if withSeen*/d = @seen_at/*%end*/" + // nullable and already a pointer
+		"/*%if tier != null*/e = @tier/*%end*/" // nullable and nil-tested: three states
 	out := declare(t, src,
 		exprtype.SQLParam{Name: "status", GoType: "string", NotNull: true},
 		exprtype.SQLParam{Name: "min_age", GoType: "int32", NotNull: true},
-		exprtype.SQLParam{Name: "note", GoType: "string"},
+		exprtype.SQLParam{Name: "note", GoType: "sql.NullString"},
+		exprtype.SQLParam{Name: "seen_at", GoType: "*time.Time"},
+		exprtype.SQLParam{Name: "tier", GoType: "sql.NullString"},
 	)
 	squeezed := strings.Join(strings.Fields(out), " ")
-	for _, want := range []string{"Status string", "MinAge *int32", "Note *string"} {
+	for _, want := range []string{
+		"Status string",
+		"MinAge *int32",
+		"Note sql.NullString",
+		"SeenAt *time.Time",
+		"Tier *sql.NullString",
+	} {
 		if !strings.Contains(squeezed, want) {
 			t.Errorf("want %q in:\n%s", want, out)
 		}
@@ -232,9 +243,9 @@ func TestGoName(t *testing.T) {
 	}
 }
 
-// A generated scope has to be keyed by every spelling the template used, since a condition
-// may write minAge while the marker beside it writes min_age.
-func TestInferRecordsEverySpelling(t *testing.T) {
+// A condition and a marker may spell one name differently, and both have to reach one field —
+// named after sqlc's own spelling, since that is the one the column has.
+func TestInferJoinsTheSpellingsOfOneName(t *testing.T) {
 	got, diags := infer(t, "/*%if minAge != null*/a = @min_age/*%end*/",
 		exprtype.SQLParam{Name: "min_age", GoType: "int32", NotNull: true})
 	if len(diags) != 0 {
@@ -243,10 +254,6 @@ func TestInferRecordsEverySpelling(t *testing.T) {
 	members := got.Fields()
 	if len(members) != 1 {
 		t.Fatalf("fields = %v, want one", members)
-	}
-	want := []string{"minAge", "min_age"}
-	if !reflect.DeepEqual(members[0].Spellings, want) {
-		t.Errorf("Spellings = %q, want %q", members[0].Spellings, want)
 	}
 	if members[0].Name != "min_age" {
 		t.Errorf("Name = %q, want the snake spelling for Go naming", members[0].Name)

@@ -2,6 +2,8 @@ package query_test
 
 import (
 	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/mpyw/sqlc-gen-go-dynamic/internal/dialect"
@@ -132,11 +134,11 @@ func TestPreparedQueryRenders(t *testing.T) {
 	}
 	// Numbering runs off one counter, so the branches that did not render leave no gap.
 	for i := range wantArgs {
-		if want := "$" + string(rune('1'+i)); !contains(res.SQL, want) {
+		if want := "$" + strconv.Itoa(i+1); !strings.Contains(res.SQL, want) {
 			t.Errorf("SQL %q is missing %s", res.SQL, want)
 		}
 	}
-	if contains(res.SQL, "$9") {
+	if strings.Contains(res.SQL, "$9") {
 		t.Errorf("SQL %q numbers past the arguments", res.SQL)
 	}
 }
@@ -144,7 +146,7 @@ func TestPreparedQueryRenders(t *testing.T) {
 func TestPrepareRejectsAColumnZeroDirective(t *testing.T) {
 	in := searchUsers()
 	in.Comments = []string{"%if activeOnly*/ and u.status = $1 /*%end"}
-	if _, _, err := query.Prepare(in); err == nil || !contains(err.Error(), "column zero") {
+	if _, _, err := query.Prepare(in); err == nil || !strings.Contains(err.Error(), "column zero") {
 		t.Errorf("error = %v, want it to report the lifted directive", err)
 	}
 }
@@ -152,16 +154,50 @@ func TestPrepareRejectsAColumnZeroDirective(t *testing.T) {
 func TestPrepareRejectsAnUnsupportedEngine(t *testing.T) {
 	in := searchUsers()
 	in.Engine = "oracle"
-	if _, _, err := query.Prepare(in); err == nil || !contains(err.Error(), "unsupported engine") {
+	if _, _, err := query.Prepare(in); err == nil || !strings.Contains(err.Error(), "unsupported engine") {
 		t.Errorf("error = %v, want it to reject the engine", err)
 	}
 }
 
-func contains(s, sub string) bool {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
+// The select-list check has to be wired in here, not merely to exist: removing the call left
+// every test green, and what it prevents is a row struct that quietly describes the wrong
+// columns.
+func TestPrepareRejectsADirectiveInTheSelectList(t *testing.T) {
+	in := searchUsers()
+	in.Cmd = ":many"
+	in.Text = "select id, /*%if useName*/ name /*%else*/ status /*%end*/ from users"
+	in.Params = nil
+	if _, _, err := query.Prepare(in); err == nil || !strings.Contains(err.Error(), "select list") {
+		t.Errorf("error = %v, want the select list reported", err)
 	}
-	return false
+}
+
+// An unbalanced template on SQLite is usually not the author's mistake: sqlc's SQLite frontend
+// drops a block comment that ends a statement, so the /*%end*/ never arrives. The message has to
+// say so, or the author goes looking for a typo that is not there.
+func TestPrepareExplainsSqlitesDroppedTail(t *testing.T) {
+	in := searchUsers()
+	in.Engine = "sqlite"
+	in.Cmd = ":exec"
+	// sqlc drops the whole trailing comment; a half-dropped one is the same cause.
+	in.Text = "update users set status = ?1 where 1 = 1 /*%if a*/ and id = 1"
+	in.Params = in.Params[:1]
+	_, _, err := query.Prepare(in)
+	if err == nil {
+		t.Fatal("want the unbalanced template reported")
+	}
+	if !strings.Contains(err.Error(), "SQLite") {
+		t.Errorf("error = %v, want it to name what SQLite did", err)
+	}
+	// The same explanation when only half the comment was dropped.
+	in.Text = "update users set status = ?1 where 1 = 1 /*%if a*/ and id = 1 /*%end"
+	if _, _, err := query.Prepare(in); err == nil || !strings.Contains(err.Error(), "SQLite") {
+		t.Errorf("error = %v, want the explanation for the truncated tail too", err)
+	}
+	// And not on an engine that does not do it.
+	in.Engine = "postgresql"
+	in.Text = "update users set status = $1 where 1 = 1 /*%if a*/ and id = 1"
+	if _, _, err := query.Prepare(in); err == nil || strings.Contains(err.Error(), "SQLite") {
+		t.Errorf("error = %v, want the plain message on PostgreSQL", err)
+	}
 }

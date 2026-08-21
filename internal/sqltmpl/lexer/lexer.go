@@ -29,7 +29,7 @@ type Lexer struct {
 
 // New creates a Lexer that recognizes the marker spellings the rules allow.
 func New(src string, rules bind.Rules) *Lexer {
-	return &Lexer{cur: scan.Cursor{Src: src}, rules: rules}
+	return &Lexer{cur: scan.Cursor{Src: src, Backslash: rules.Backslash, Nested: rules.Nested, DollarQuotes: rules.DollarQuotes}, rules: rules}
 }
 
 // Next returns the next token. The last token is of kind token.EOF.
@@ -73,9 +73,11 @@ func (l *Lexer) Next() (Token, error) {
 			return tok, nil
 
 		default:
-			// A marker cannot follow an operator: `<@ tags` and `@@ x` end in @, and the name
-			// after them belongs to the operator, not to a bind.
-			if c.I > 0 && bind.OperatorByte(c.Src[c.I-1]) {
+			// An @name cannot follow an operator: `<@ tags` and `@@ x` end in @, and the name
+			// after them belongs to the operator, not to a bind. Only that form is affected —
+			// a call form after an operator is ordinary, and `age>=sqlc.arg('lo')` is what
+			// restoring a placeholder produces.
+			if c.At() == '@' && c.I > 0 && bind.OperatorByte(c.Src[c.I-1]) {
 				c.I++
 				continue
 			}

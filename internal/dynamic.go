@@ -61,11 +61,12 @@ func dynamicQuery(req *plugin.GenerateRequest, options *opts.Options, q *plugin.
 			t = strings.TrimPrefix(t, "[]")
 		}
 		in.Params = append(in.Params, query.Param{
-			Number:  int(p.Number),
-			Name:    p.Column.GetName(),
-			GoType:  t,
-			NotNull: p.Column.NotNull,
-			IsSlice: p.Column.IsSqlcSlice,
+			Number:   int(p.Number),
+			Name:     p.Column.GetName(),
+			GoType:   t,
+			Explicit: overridden(req, options, p.Column),
+			NotNull:  p.Column.NotNull,
+			IsSlice:  p.Column.IsSqlcSlice,
 		})
 	}
 

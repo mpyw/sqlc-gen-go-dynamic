@@ -9,10 +9,10 @@ import (
 
 func TestRestore(t *testing.T) {
 	all := []placeholder.Param{
-		{Number: 1, Name: "status"},
-		{Number: 2, Name: "note"},
-		{Number: 3, Name: "ids", List: true},
-		{Number: 4, Name: "c.name"},
+		{Name: "status"},
+		{Name: "note"},
+		{Name: "ids", List: true},
+		{Name: "c.name"},
 	}
 	one := all[:1]
 	two := all[:2]
@@ -32,7 +32,7 @@ func TestRestore(t *testing.T) {
 				"and c in (sqlc.slice('ids')) and d = sqlc.arg('c.name')",
 		},
 		{
-			name:   "a bare question mark takes the next parameter in order",
+			name:   "a bare question mark takes the next parameter in order of appearance",
 			params: two,
 			style:  placeholder.Question,
 			in:     "select 1 where a = ? and b = ?",
@@ -48,9 +48,9 @@ func TestRestore(t *testing.T) {
 		},
 		{
 			name:   "directives and text are untouched",
-			params: []placeholder.Param{{Number: 1, Name: "status"}, {Number: 4, Name: "c.name"}},
+			params: []placeholder.Param{{Name: "status"}, {Name: "c.name"}},
 			style:  placeholder.Dollar,
-			in:     "select 1\n  /*%if activeOnly*/ and a = $1 /*%end*/\n  /*%for c in cs*/ and d = $4 /*%end*/",
+			in:     "select 1\n  /*%if activeOnly*/ and a = $1 /*%end*/\n  /*%for c in cs*/ and d = $2 /*%end*/",
 			want: "select 1\n  /*%if activeOnly*/ and a = sqlc.arg('status') /*%end*/\n" +
 				"  /*%for c in cs*/ and d = sqlc.arg('c.name') /*%end*/",
 		},
@@ -118,8 +118,8 @@ func TestRestoreSQLiteMixesNumberedAndBare(t *testing.T) {
 	got, err := placeholder.Restore(
 		"select id from t where 1 = 1\n  /*%if s != null*/ and s = ?1 /*%end*/\n  and id in (/*SLICE:ids*/?)",
 		[]placeholder.Param{
-			{Number: 1, Name: "status"},
-			{Number: 2, Name: "ids", List: true},
+			{Name: "status"},
+			{Name: "ids", List: true},
 		}, placeholder.QuestionNumbered)
 	if err != nil {
 		t.Fatalf("restore: %v", err)
@@ -135,9 +135,9 @@ func TestRestoreSQLiteMixesNumberedAndBare(t *testing.T) {
 // API with a field nothing binds, so the disagreement is reported.
 func TestRestoreReportsAnUnusedParameter(t *testing.T) {
 	_, err := placeholder.Restore("select id from t where a = $1",
-		[]placeholder.Param{{Number: 1, Name: "a"}, {Number: 2, Name: "lost"}},
+		[]placeholder.Param{{Name: "a"}, {Name: "lost"}},
 		placeholder.Dollar)
-	if err == nil || !strings.Contains(err.Error(), "has no placeholder") {
+	if err == nil || !strings.Contains(err.Error(), "nothing in the text binds") {
 		t.Errorf("error = %v, want the unused parameter reported", err)
 	}
 }
@@ -146,7 +146,7 @@ func TestRestoreReportsAnUnusedParameter(t *testing.T) {
 // emitting sqlc.arg(”) for the lexer to reject.
 func TestRestoreReportsANamelessParameter(t *testing.T) {
 	_, err := placeholder.Restore("select id from t where 1 = $1",
-		[]placeholder.Param{{Number: 1, Name: ""}}, placeholder.Dollar)
+		[]placeholder.Param{{Name: ""}}, placeholder.Dollar)
 	if err == nil || !strings.Contains(err.Error(), "has no name") {
 		t.Errorf("error = %v, want the nameless parameter reported", err)
 	}
@@ -156,7 +156,7 @@ func TestRestoreReportsANamelessParameter(t *testing.T) {
 // server.
 func TestRestoreStripsTheSliceMarker(t *testing.T) {
 	got, err := placeholder.Restore("select id from t where id in (/*SLICE:ids*/?)",
-		[]placeholder.Param{{Number: 1, Name: "ids", List: true}}, placeholder.Question)
+		[]placeholder.Param{{Name: "ids", List: true}}, placeholder.Question)
 	if err != nil {
 		t.Fatalf("restore: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestRestoreStripsTheSliceMarker(t *testing.T) {
 // MySQL's # comment hides a placeholder from restoration, as it does from sqlc.
 func TestRestoreSkipsAHashComment(t *testing.T) {
 	got, err := placeholder.Restore("select id from t where s = ? # really?\n",
-		[]placeholder.Param{{Number: 1, Name: "s"}}, placeholder.Question)
+		[]placeholder.Param{{Name: "s"}}, placeholder.Question)
 	if err != nil {
 		t.Fatalf("restore: %v", err)
 	}
@@ -180,11 +180,217 @@ func TestRestoreSkipsAHashComment(t *testing.T) {
 // A dollar-quoted string is opaque to restoration too, or a placeholder inside one is rewritten.
 func TestRestoreSkipsADollarQuotedString(t *testing.T) {
 	got, err := placeholder.Restore("select $$note $2 here$$, a = $1",
-		[]placeholder.Param{{Number: 1, Name: "a"}}, placeholder.Dollar)
+		[]placeholder.Param{{Name: "a"}}, placeholder.Dollar)
 	if err != nil {
 		t.Fatalf("restore: %v", err)
 	}
 	if got != "select $$note $2 here$$, a = sqlc.arg('a')" {
 		t.Errorf("Restore = %q", got)
+	}
+}
+
+// These pin what real sqlc actually reports, because the obvious reading of the request is
+// wrong: plugin.Parameter.number is sqlc's own analysis number, not the placeholder's position.
+// Reading it put every marker in the wrong place while every consistency check still passed.
+//
+// The observations, from sqlc v1.31.1:
+//
+//	mysql   select … where status = ? and age > ? order by id limit ? offset ?
+//	        numbers 3, 4, 1, 2 — and sqlc's own code passes arg.St, arg.Lo, arg.Limit, arg.Offset
+//	sqlite  select … where status = ?1 and age > ?2 order by id limit ?4 offset ?3
+//	        numbers 1, 2, 3, 4 for st, lo, off, lim
+//
+// In both, the order sqlc reports the parameters in is the order it passes the arguments in,
+// and the nth argument binds the placeholder the driver numbers n. So position decides.
+func TestRestoreFollowsSqlcsArgumentOrder(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		style  placeholder.Style
+		params []placeholder.Param
+		in     string
+		want   string
+	}{
+		{
+			// A literal ? the author wrote is a parameter like any other, and naming it is
+			// what lets the renderer emit it in the same place.
+			name:   "a literal limit placeholder, which sqlc numbers first and reports last",
+			style:  placeholder.Question,
+			params: []placeholder.Param{{Name: "st"}, {Name: "lo"}, {Name: "limit"}, {Name: "offset"}},
+			in:     "select id from users where status = ? and age > ? order by id limit ? offset ?",
+			want: "select id from users where status = sqlc.arg('st') and age > sqlc.arg('lo') " +
+				"order by id limit sqlc.arg('limit') offset sqlc.arg('offset')",
+		},
+		{
+			name:   "numbered placeholders out of textual order",
+			style:  placeholder.QuestionNumbered,
+			params: []placeholder.Param{{Name: "st"}, {Name: "lo"}, {Name: "off"}, {Name: "lim"}},
+			in:     "select id from users where status = ?1 and age > ?2 order by id limit ?4 offset ?3",
+			want: "select id from users where status = sqlc.arg('st') and age > sqlc.arg('lo') " +
+				"order by id limit sqlc.arg('lim') offset sqlc.arg('off')",
+		},
+		{
+			// The bare one is the slice, and it takes one more than the highest number so
+			// far — SQLite's own rule. Counting occurrences instead made the reused ?1
+			// inflate the count and refused the query outright.
+			name:   "a reused number beside a bare placeholder",
+			style:  placeholder.QuestionNumbered,
+			params: []placeholder.Param{{Name: "a"}, {Name: "ids", List: true}},
+			in:     "select id from users where (name = ?1 or status = ?1) and id in (/*SLICE:ids*/?)",
+			want: "select id from users where (name = sqlc.arg('a') or status = sqlc.arg('a')) " +
+				"and id in (sqlc.slice('ids'))",
+		},
+		{
+			// MySQL reports a reused marker twice, once per occurrence.
+			name:   "a marker reused, which MySQL reports once per occurrence",
+			style:  placeholder.Question,
+			params: []placeholder.Param{{Name: "a"}, {Name: "a"}, {Name: "b"}},
+			in:     "select id from users where (name = ? or status = ?) and age > ?",
+			want: "select id from users where (name = sqlc.arg('a') or status = sqlc.arg('a')) " +
+				"and age > sqlc.arg('b')",
+		},
+		{
+			name:   "a slice ahead of numbered placeholders",
+			style:  placeholder.QuestionNumbered,
+			params: []placeholder.Param{{Name: "ids", List: true}, {Name: "st"}, {Name: "lim"}},
+			in:     "select id from users where id in (/*SLICE:ids*/?) and status = ?2 order by id limit ?3",
+			want: "select id from users where id in (sqlc.slice('ids')) and status = sqlc.arg('st') " +
+				"order by id limit sqlc.arg('lim')",
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := placeholder.Restore(c.in, c.params, c.style)
+			if err != nil {
+				t.Fatalf("restore: %v", err)
+			}
+			if got != c.want {
+				t.Errorf("Restore\n got: %q\nwant: %q", got, c.want)
+			}
+		})
+	}
+}
+
+// A backslash escapes a quote in MySQL and does not in PostgreSQL, where a lone backslash ends
+// nothing: reading one there ran past the closing quote, so the next quote opened a span and the
+// SQL between two literals was read as code.
+func TestRestoreReadsEscapesPerDialect(t *testing.T) {
+	// MySQL: the literal contains a quote, so it closes at the second ', not the first.
+	got, err := placeholder.Restore(`select id from t where name = 'O\'Brien' and s = ?`,
+		[]placeholder.Param{{Name: "s"}}, placeholder.Question)
+	if err != nil {
+		t.Fatalf("mysql: %v", err)
+	}
+	if want := `select id from t where name = 'O\'Brien' and s = sqlc.arg('s')`; got != want {
+		t.Errorf("mysql\n got: %q\nwant: %q", got, want)
+	}
+	// PostgreSQL: 'a\' is a complete literal holding a backslash, so what follows is code and
+	// the placeholder in it is one.
+	got, err = placeholder.Restore(`select id from t where a = 'a\' and b = $1`,
+		[]placeholder.Param{{Name: "b"}}, placeholder.Dollar)
+	if err != nil {
+		t.Fatalf("postgres: %v", err)
+	}
+	if want := `select id from t where a = 'a\' and b = sqlc.arg('b')`; got != want {
+		t.Errorf("postgres\n got: %q\nwant: %q", got, want)
+	}
+	// PostgreSQL's E'…' does honor the backslash, so the span runs to the second quote.
+	got, err = placeholder.Restore(`select id from t where a = E'it\'s' and b = $1`,
+		[]placeholder.Param{{Name: "b"}}, placeholder.Dollar)
+	if err != nil {
+		t.Fatalf("escape string: %v", err)
+	}
+	if want := `select id from t where a = E'it\'s' and b = sqlc.arg('b')`; got != want {
+		t.Errorf("escape string\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// MySQL and SQLite do not nest block comments, so `/** a /* b */` is a whole comment there.
+// Treating it as an unterminated one aborted the generate for a query that was fine.
+func TestRestoreNestsCommentsOnlyWherePostgresDoes(t *testing.T) {
+	const src = "select id from t /** legacy /* note */ where s = ?"
+	got, err := placeholder.Restore(src, []placeholder.Param{{Name: "s"}}, placeholder.Question)
+	if err != nil {
+		t.Fatalf("mysql: %v", err)
+	}
+	if want := "select id from t /** legacy /* note */ where s = sqlc.arg('s')"; got != want {
+		t.Errorf("mysql\n got: %q\nwant: %q", got, want)
+	}
+	// PostgreSQL does nest, so the same shape is one comment that swallows the rest.
+	if _, err := placeholder.Restore("select id from t /** a /* b */ where s = $1",
+		[]placeholder.Param{{Name: "s"}}, placeholder.Dollar); err == nil {
+		t.Error("want an error: PostgreSQL nests, so that comment is still open")
+	}
+}
+
+// SQLite gives a second occurrence of the same slice no number of its own — sqlc's own
+// generated code replaces only the first — so counting placeholders took the next parameter
+// instead. The marker comment names the parameter, which is the only sound identification.
+func TestRestoreReadsARepeatedSliceByName(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		style  placeholder.Style
+		params []placeholder.Param
+		in     string
+		want   string
+	}{
+		{
+			// sqlite: one parameter for both occurrences, and a scalar numbered after it.
+			name:   "sqlite numbers the slice once",
+			style:  placeholder.QuestionNumbered,
+			params: []placeholder.Param{{Name: "ids", List: true}, {Name: "st"}},
+			in:     "select id from t where id in (/*SLICE:ids*/?) and id2 in (/*SLICE:ids*/?) and s = ?2",
+			want: "select id from t where id in (sqlc.slice('ids')) and id2 in (sqlc.slice('ids')) " +
+				"and s = sqlc.arg('st')",
+		},
+		{
+			// mysql: one parameter per occurrence, so both consume a number.
+			name:   "mysql reports it once per occurrence",
+			style:  placeholder.Question,
+			params: []placeholder.Param{{Name: "ids", List: true}, {Name: "ids", List: true}, {Name: "lo"}},
+			in:     "select id from t where id in (/*SLICE:ids*/?) and s in (/*SLICE:ids*/?) and a > ?",
+			want: "select id from t where id in (sqlc.slice('ids')) and s in (sqlc.slice('ids')) " +
+				"and a > sqlc.arg('lo')",
+		},
+		{
+			// postgresql: numbers are authoritative and there is no marker comment at all.
+			name:   "postgresql repeats the number",
+			style:  placeholder.Dollar,
+			params: []placeholder.Param{{Name: "ids", List: true}, {Name: "lo"}},
+			in:     "select id from t where id in ($1) and id2 in ($1) and a > $2",
+			want: "select id from t where id in (sqlc.slice('ids')) and id2 in (sqlc.slice('ids')) " +
+				"and a > sqlc.arg('lo')",
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := placeholder.Restore(c.in, c.params, c.style)
+			if err != nil {
+				t.Fatalf("restore: %v", err)
+			}
+			if got != c.want {
+				t.Errorf("Restore\n got: %q\nwant: %q", got, c.want)
+			}
+		})
+	}
+}
+
+// A slice marker naming something sqlc did not report means the text and the table disagree,
+// which is worth saying rather than restoring some other parameter there.
+func TestRestoreReportsAnUnknownSliceName(t *testing.T) {
+	_, err := placeholder.Restore("select id from t where id in (/*SLICE:other*/?)",
+		[]placeholder.Param{{Name: "ids", List: true}}, placeholder.QuestionNumbered)
+	if err == nil || !strings.Contains(err.Error(), "disagree about the query") {
+		t.Errorf("error = %v, want the disagreement reported", err)
+	}
+}
+
+// Only PostgreSQL has dollar-quoted strings. A MySQL identifier may contain dollars, and
+// reading `a$x$b` as the opening of a span swallowed whatever came after it.
+func TestRestoreReadsDollarQuotesOnlyInPostgres(t *testing.T) {
+	got, err := placeholder.Restore("select a$x$b from t where s = ?",
+		[]placeholder.Param{{Name: "s"}}, placeholder.Question)
+	if err != nil {
+		t.Fatalf("mysql: %v", err)
+	}
+	if want := "select a$x$b from t where s = sqlc.arg('s')"; got != want {
+		t.Errorf("mysql\n got: %q\nwant: %q", got, want)
 	}
 }

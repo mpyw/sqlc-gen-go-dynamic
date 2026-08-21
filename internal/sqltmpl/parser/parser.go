@@ -2,6 +2,7 @@
 package parser
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/mpyw/sqlc-gen-go-dynamic/internal/bind"
@@ -11,6 +12,12 @@ import (
 )
 
 // Parse parses a template, reading the marker spellings the rules allow.
+// ErrUnclosed reports a template whose blocks do not balance. It is worth telling apart because
+// one cause is not the author's mistake: some engine frontends drop a block comment that ends a
+// statement, which leaves the directive that closed the last block missing from the text sqlc
+// hands back.
+var ErrUnclosed = errors.New("unclosed directive block")
+
 func Parse(src string, rules bind.Rules) ([]ast.Node, error) {
 	p := &parser{lex: lexer.New(src, rules)}
 	nodes, err := p.parse()
@@ -18,7 +25,7 @@ func Parse(src string, rules bind.Rules) ([]ast.Node, error) {
 		return nil, err
 	}
 	if len(p.stack) != 0 {
-		return nil, fmt.Errorf("template: %d unclosed directive block(s)", len(p.stack))
+		return nil, fmt.Errorf("template: %d unclosed directive block(s): %w", len(p.stack), ErrUnclosed)
 	}
 	return nodes, nil
 }

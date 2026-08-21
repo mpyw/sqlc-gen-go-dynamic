@@ -38,7 +38,7 @@ func (q *Queries) {{.MethodName}}(ctx context.Context, db DBTX, {{.Arg.Pair}}) (
 	var {{.Ret.Name}} {{.Ret.Type}}
 	stmt, err := {{.TemplateVar}}.Build(arg)
 	if err != nil {
-		return {{.Ret.ReturnName}}, err
+		return {{.Ret.ReturnName}}, {{if $.WrapErrors}}fmt.Errorf("query {{.MethodName}}: %w", err){{else}}err{{end}}
 	}
 	row := db.QueryRow(ctx, stmt.SQL, stmt.Args...)
 {{- else -}}
@@ -46,7 +46,7 @@ func (q *Queries) {{.MethodName}}(ctx context.Context, {{.Arg.Pair}}) ({{.Ret.De
 	var {{.Ret.Name}} {{.Ret.Type}}
 	stmt, err := {{.TemplateVar}}.Build(arg)
 	if err != nil {
-		return {{.Ret.ReturnName}}, err
+		return {{.Ret.ReturnName}}, {{if $.WrapErrors}}fmt.Errorf("query {{.MethodName}}: %w", err){{else}}err{{end}}
 	}
 	row := q.db.QueryRow(ctx, stmt.SQL, stmt.Args...)
 {{- end}}
@@ -88,14 +88,14 @@ func (q *Queries) {{.MethodName}}(ctx context.Context, {{.Arg.Pair}}) ({{.Ret.De
 func (q *Queries) {{.MethodName}}(ctx context.Context, db DBTX, {{.Arg.Pair}}) ([]{{.Ret.DefineType}}, error) {
 	stmt, err := {{.TemplateVar}}.Build(arg)
 	if err != nil {
-		return nil, err
+		return nil, {{if $.WrapErrors}}fmt.Errorf("query {{.MethodName}}: %w", err){{else}}err{{end}}
 	}
 	rows, err := db.Query(ctx, stmt.SQL, stmt.Args...)
 {{- else -}}
 func (q *Queries) {{.MethodName}}(ctx context.Context, {{.Arg.Pair}}) ([]{{.Ret.DefineType}}, error) {
 	stmt, err := {{.TemplateVar}}.Build(arg)
 	if err != nil {
-		return nil, err
+		return nil, {{if $.WrapErrors}}fmt.Errorf("query {{.MethodName}}: %w", err){{else}}err{{end}}
 	}
 	rows, err := q.db.Query(ctx, stmt.SQL, stmt.Args...)
 {{- end}}
@@ -160,14 +160,14 @@ func (q *Queries) {{.MethodName}}(ctx context.Context, {{.Arg.Pair}}) ([]{{.Ret.
 func (q *Queries) {{.MethodName}}(ctx context.Context, db DBTX, {{.Arg.Pair}}) error {
 	stmt, err := {{.TemplateVar}}.Build(arg)
 	if err != nil {
-		return err
+		return {{if $.WrapErrors}}fmt.Errorf("query {{.MethodName}}: %w", err){{else}}err{{end}}
 	}
 	_, err = db.Exec(ctx, stmt.SQL, stmt.Args...)
 {{- else -}}
 func (q *Queries) {{.MethodName}}(ctx context.Context, {{.Arg.Pair}}) error {
 	stmt, err := {{.TemplateVar}}.Build(arg)
 	if err != nil {
-		return err
+		return {{if $.WrapErrors}}fmt.Errorf("query {{.MethodName}}: %w", err){{else}}err{{end}}
 	}
 	_, err = q.db.Exec(ctx, stmt.SQL, stmt.Args...)
 {{- end}}

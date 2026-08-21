@@ -7,6 +7,7 @@ package exprlang
 import (
 	"strings"
 	"sync"
+	"unicode"
 
 	goexpr "github.com/expr-lang/expr"
 	"github.com/expr-lang/expr/ast"
@@ -34,15 +35,30 @@ func (e *Evaluator) Eval(expression string, scope map[string]any) (any, error) {
 
 // foldNames rewrites every identifier and member name to its folded form, matching how a
 // scope is keyed.
-type foldNames struct{}
+//
+// A method call is the exception. Go's method names are the ones the caller declared and
+// nothing folds them, so the callee of a call keeps its spelling — the walk reaches a node
+// after its children, which is what lets the fold be undone here.
+type foldNames struct {
+	orig map[*ast.StringNode]string
+}
 
-func (foldNames) Visit(node *ast.Node) {
+func (f foldNames) Visit(node *ast.Node) {
 	switch n := (*node).(type) {
 	case *ast.IdentifierNode:
 		n.Value = fold(n.Value)
 	case *ast.MemberNode:
 		if p, ok := n.Property.(*ast.StringNode); ok {
+			f.orig[p] = p.Value
 			p.Value = fold(p.Value)
+		}
+	case *ast.CallNode:
+		if m, ok := n.Callee.(*ast.MemberNode); ok {
+			if p, ok := m.Property.(*ast.StringNode); ok {
+				if was, seen := f.orig[p]; seen {
+					p.Value = was
+				}
+			}
 		}
 	}
 }
@@ -54,10 +70,7 @@ func fold(s string) string {
 		if r == '_' {
 			continue
 		}
-		if r >= 'A' && r <= 'Z' {
-			r += 'a' - 'A'
-		}
-		b.WriteRune(r)
+		b.WriteRune(unicode.ToLower(r))
 	}
 	return b.String()
 }
@@ -76,7 +89,7 @@ func (e *Evaluator) compile(expression string) (*vm.Program, error) {
 	// time removes the guesswork, and costs nothing at run time.
 	prog, err := goexpr.Compile(expression,
 		goexpr.AllowUndefinedVariables(),
-		goexpr.Patch(foldNames{}))
+		goexpr.Patch(foldNames{orig: map[*ast.StringNode]string{}}))
 	if err != nil {
 		return nil, err
 	}

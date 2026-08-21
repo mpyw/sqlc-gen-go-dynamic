@@ -8,14 +8,33 @@
 package scan
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
 
-// Cursor is a position in SQL text.
+// ErrUnterminatedComment reports a block comment with no end. It is worth telling apart because
+// one cause is not the author's mistake: an engine frontend that drops a block comment ending a
+// statement can leave half of one behind.
+var ErrUnterminatedComment = errors.New("unterminated block comment")
+
+// Cursor is a position in SQL text. The two flags are the whole of what a span means
+// differently from one engine to the next.
 type Cursor struct {
 	Src string
 	I   int
+	// Backslash marks a dialect where a backslash escapes a quote inside a string literal.
+	// MySQL does by default; PostgreSQL under standard_conforming_strings and SQLite do not,
+	// and reading one there runs past the real closing quote, which makes the next quote open
+	// a span and turns the text between two literals into code.
+	Backslash bool
+	// Nested marks a dialect where block comments nest, which PostgreSQL does and MySQL and
+	// SQLite do not: there `/* a /* b */` is a complete comment.
+	Nested bool
+	// DollarQuotes marks a dialect with $tag$…$tag$ strings, which is PostgreSQL alone. A
+	// MySQL identifier may contain dollars, so `a$x$b` there is a name and not the opening of
+	// a span that would swallow whatever followed.
+	DollarQuotes bool
 }
 
 // Done reports whether the cursor is at the end.
@@ -45,6 +64,9 @@ func (c *Cursor) AtQuote() bool {
 // tag between the dollars is an identifier or empty, which is what tells $$…$$ and $tag$…$tag$
 // apart from a $1 placeholder or a lone $.
 func (c *Cursor) AtDollarQuote() bool {
+	if !c.DollarQuotes {
+		return false
+	}
 	_, ok := c.dollarTag()
 	return ok
 }
@@ -97,14 +119,14 @@ func (c *Cursor) AtLineComment() bool { return c.At() == '-' && c.Peek(1) == '-'
 func (c *Cursor) AtBlockComment() bool { return c.At() == '/' && c.Peek(1) == '*' }
 
 // SkipQuoted consumes the quoted span at the cursor. A quote is escaped by doubling it, and
-// also by a backslash: MySQL does that by default, and rejecting it would turn a legal query
-// into a build failure. In a dialect where a backslash is literal this reads one character
-// further than the server would, which can only extend the span, never end it early.
+// in some dialects by a backslash as well — see Cursor.Backslash, and PostgreSQL's E'…', where
+// a backslash escapes whatever the setting says elsewhere.
 func (c *Cursor) SkipQuoted() error {
 	q := c.At()
+	esc := c.Backslash || c.atEscapeString()
 	c.I++
 	for !c.Done() {
-		if c.At() == '\\' && c.I+1 < len(c.Src) {
+		if esc && c.At() == '\\' && c.I+1 < len(c.Src) {
 			c.I += 2
 			continue
 		}
@@ -122,6 +144,22 @@ func (c *Cursor) SkipQuoted() error {
 	return fmt.Errorf("unterminated quoted literal")
 }
 
+// atEscapeString reports whether the quote at the cursor opens a PostgreSQL E'…' literal, in
+// which a backslash escapes regardless of standard_conforming_strings. The E has to be a word
+// of its own, so that a column named `note` before a quote is not read as one.
+func (c *Cursor) atEscapeString() bool {
+	if c.At() != '\'' || c.I == 0 {
+		return false
+	}
+	if b := c.Src[c.I-1]; b != 'E' && b != 'e' {
+		return false
+	}
+	if c.I == 1 {
+		return true
+	}
+	return !isTagByte(c.Src[c.I-2], false)
+}
+
 // SkipLine consumes the rest of the line, leaving the newline.
 func (c *Cursor) SkipLine() {
 	for !c.Done() && c.At() != '\n' {
@@ -130,14 +168,15 @@ func (c *Cursor) SkipLine() {
 }
 
 // ReadBlockComment consumes the block comment at the cursor and returns its body. Nesting is
-// honored, because PostgreSQL nests block comments.
+// honored where the engine does it — see Cursor.Nested; where it does not, `/** a /* b */` is a
+// whole comment and treating it as an open one made a legal query fail to build.
 func (c *Cursor) ReadBlockComment() (string, error) {
 	c.I += 2
 	start := c.I
 	depth := 1
 	for !c.Done() {
 		switch {
-		case c.At() == '/' && c.Peek(1) == '*':
+		case c.Nested && c.At() == '/' && c.Peek(1) == '*':
 			depth++
 			c.I += 2
 		case c.At() == '*' && c.Peek(1) == '/':
@@ -150,5 +189,5 @@ func (c *Cursor) ReadBlockComment() (string, error) {
 			c.I++
 		}
 	}
-	return "", fmt.Errorf("unterminated block comment")
+	return "", ErrUnterminatedComment
 }

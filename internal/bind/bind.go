@@ -23,23 +23,33 @@ type Marker struct {
 type Rules struct {
 	AtForm       bool
 	HashComments bool
+	// Backslash marks a dialect where a backslash escapes a quote in a string literal, Nested
+	// one where block comments nest, and DollarQuotes one with $tag$…$tag$ strings. All three
+	// are scan's business; they live here because this is where a template's engine is turned
+	// into what its text means.
+	Backslash    bool
+	Nested       bool
+	DollarQuotes bool
 }
 
 // RulesFor resolves the rules for an engine name. An engine it does not know gets the narrower
 // reading: recognizing a marker that sqlc did not is the failure worth avoiding.
 func RulesFor(engine string) Rules {
 	switch engine {
-	case "postgresql", "sqlite":
+	case "postgresql":
+		return Rules{AtForm: true, Nested: true, DollarQuotes: true}
+	case "sqlite":
 		return Rules{AtForm: true}
 	case "mysql":
-		return Rules{HashComments: true}
+		return Rules{HashComments: true, Backslash: true}
 	}
 	return Rules{}
 }
 
-// OperatorByte reports whether b can be part of a SQL operator. A marker is only a marker when
-// what precedes it is not one: `<@`, `@@` and their relatives end in @, and reading the name
-// after them as a bind invents a parameter.
+// OperatorByte reports whether b can be part of a SQL operator. It applies to the @name form
+// alone: `<@`, `@@` and their relatives end in @, and reading the name after one as a bind
+// invents a parameter sqlc never reported. The call forms are not affected — `id=sqlc.arg('id')`
+// is exactly what restoring a placeholder produces, and refusing it dropped the parameter.
 func OperatorByte(b byte) bool {
 	switch b {
 	case '+', '-', '*', '/', '<', '>', '=', '~', '!', '@', '#', '%', '^', '&', '|', '`', '?':

@@ -14,7 +14,7 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 go build -o "$work/plugin" "$root/plugin"
-cp "$here/schema.sql" "$here/query.sql" "$work/"
+cp "$here/schema.sql" "$here/query.sql" "$here/static.sql" "$work/"
 sed "s|@PLUGIN@|$work/plugin|" "$here/sqlc.yaml.tmpl" >"$work/sqlc.yaml"
 mkdir -p "$work/gen"
 
@@ -42,6 +42,20 @@ if ! grep -q "searchUsersTemplate = dyn.MustParse" "$work/gen/query.sql.go"; the
     echo "FAIL: a query with directives did not get a template" >&2
     exit 1
 fi
+# A parameter whose type is not a builtin has to bring its import with it.
+if ! grep -qE "Since +\*pgtype\.Timestamptz" "$work/gen/query.sql.go"; then
+    echo "FAIL: a nil-tested nullable parameter did not get its own type" >&2
+    exit 1
+fi
+
+# Byte-for-byte with sqlc's own generator, for each driver.
+for driver in pgx std; do
+    if ! diff -r "$work/g_$driver" "$work/p_$driver"; then
+        echo "FAIL: static output differs from gen: go ($driver)" >&2
+        exit 1
+    fi
+done
+echo "--- byte-for-byte with gen: go (pgx, database/sql) ---"
 
 cat >"$work/go.mod" <<EOF
 module sqlccheck

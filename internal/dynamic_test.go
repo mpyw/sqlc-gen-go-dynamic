@@ -1,11 +1,15 @@
 package golang
 
 import (
+	"go/parser"
+	"go/token"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/sqlc-dev/plugin-sdk-go/plugin"
 
+	"github.com/mpyw/sqlc-gen-go-dynamic/internal/bind"
 	"github.com/mpyw/sqlc-gen-go-dynamic/internal/opts"
 )
 
@@ -55,11 +59,6 @@ func TestDirectiveFreeQueryIsUntouched(t *testing.T) {
 		{
 			name: "an escape-string literal", engine: "postgresql",
 			text: `select id from users where name = E'it\'s'`,
-		},
-		{
-			// A comment that begins with % is prose, not a directive.
-			name: "prose beginning with a percent sign", engine: "postgresql",
-			text: "select id from users where id = $1",
 		},
 		{
 			name: "text that merely mentions a directive", engine: "postgresql",
@@ -179,7 +178,7 @@ func TestDynamicTypesAreCollected(t *testing.T) {
 func TestPreparedQueriesAreRefused(t *testing.T) {
 	req := request("postgresql")
 	req.Queries = []*plugin.Query{withParam(aQuery(
-		"select id from users where 1 = 1 /*%if a*/ and status = $1 /*%end*/"), "status", "string")}
+		"select id from users where 1 = 1 /*%if a*/ and status = $1 /*%end*/"), "status", "text")}
 	_, err := buildQueries(req, options(func(o *opts.Options) { o.EmitPreparedQueries = true }), nil)
 	if err == nil || !strings.Contains(err.Error(), "emit_prepared_queries") {
 		t.Errorf("err = %v, want the combination refused", err)
@@ -222,4 +221,154 @@ func commandBlock(t *testing.T, src, cmd string) string {
 		return rest[:j]
 	}
 	return rest
+}
+
+// The declarations this plugin writes into the user's file are text, and nothing else checks
+// them. A golden comparison plus a parse is what makes a broken brace or a wrongly keyed scope
+// a test failure rather than a compile error in someone's project — deleting the closing brace
+// of the emitted method, or keying the scope by the Go name instead of the template's, left the
+// whole suite green.
+func TestDeclarationsAreWhatTheyShouldBe(t *testing.T) {
+	q := withParam(withParam(aQuery(
+		"select id from users where 1 = 1\n"+
+			"  /*%if activeOnly*/ and status = $1 /*%end*/\n"+
+			"  /*%if minAge != null*/ and age > $2 /*%end*/\n"),
+		"status", "text"), "min_age", "int4")
+	q.Params[0].Column.NotNull = true
+	q.Params[1].Column.NotNull = true
+	got, err := dynamicQuery(request("postgresql"), options(), q)
+	if err != nil {
+		t.Fatalf("dynamicQuery: %v", err)
+	}
+	const want = `type QParams struct {
+	ActiveOnly bool
+	Status     string
+	MinAge     *int32
+}
+
+// TemplateScope names the fields as the template does.
+func (p QParams) TemplateScope() map[string]any {
+	return map[string]any{
+		"activeOnly": p.ActiveOnly,
+		"status": p.Status,
+		"min_age": p.MinAge,
+	}
+}
+`
+	if got.Decls != want {
+		t.Errorf("declarations\n got:\n%s\nwant:\n%s", got.Decls, want)
+	}
+	// The scope is keyed by the template's spelling, not the Go one: that is the name a
+	// condition writes, and the runtime folds from there.
+	if strings.Contains(got.Decls, `"MinAge"`) || strings.Contains(got.Decls, `"Status"`) {
+		t.Error("the scope must be keyed by the template's spelling")
+	}
+	if _, err := parser.ParseFile(token.NewFileSet(), "d.go", "package p\n\n"+got.Decls, 0); err != nil {
+		t.Errorf("the declarations are not valid Go: %v", err)
+	}
+}
+
+// A directive-free query must not reach marker restoration, parsing or the lints at all — that
+// is what makes the byte-for-byte claim structural rather than something to keep testing. The
+// gate is asserted directly, because a test that only checks the query did not become dynamic
+// passes just as well when the work happened and was thrown away: replacing the lexer-exact gate
+// with the naive substring it replaced left the suite green.
+func TestTheGateIsExact(t *testing.T) {
+	pg := bind.RulesFor("postgresql")
+	for _, c := range []struct {
+		name string
+		q    *plugin.Query
+		want bool
+	}{
+		{"a directive in the body", aQuery("select 1 /*%if a*/ x /*%end*/"), true},
+		{"a directive sqlc lifted into the comments", aQuery("select 1\n", "%if a*/ x /*%end"), true},
+		{"a directive inside a string literal", aQuery("select '/*%if a*/'"), false},
+		{"a directive inside a line comment", aQuery("select 1 -- /*%if a*/"), false},
+		{"a directive inside a dollar-quoted string", aQuery("select $$ /*%if a*/ $$"), false},
+		{"a parser comment is not a directive", aQuery("select 1 /*%! a note */"), false},
+		{"prose in a comment", aQuery("select 1", " % of users active"), false},
+		{"a plain comment mentioning one", aQuery("select 1 /** see /*%if*/ elsewhere */"), false},
+		{"no mention at all", aQuery("select 1 where id = $1"), false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := carriesDirective(c.q, pg)
+			if err != nil {
+				t.Fatalf("carriesDirective: %v", err)
+			}
+			if got != c.want {
+				t.Errorf("carriesDirective = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// The types a dynamic params struct mentions have to reach import resolution and unused-struct
+// filtering. Both consumers were unprotected: deleting either loop left the suite green, and the
+// generated file then named a type it never imported, or lost the model it referred to.
+func TestDynamicTypesReachBothConsumers(t *testing.T) {
+	q := Query{
+		Cmd:          ":many",
+		SourceName:   "query.sql",
+		MethodName:   "Q",
+		Dynamic:      true,
+		DynamicTypes: []string{"pgtype.Timestamptz", "[]Mood", "*sql.NullString"},
+		Arg:          QueryValue{Name: "arg", Typ: "QParams"},
+	}
+	i := &importer{Options: &opts.Options{SqlPackage: "pgx/v5"}, Queries: []Query{q}}
+	imps := i.queryImports("query.sql")
+	var got []string
+	for _, spec := range append(append([]ImportSpec{}, imps.Std...), imps.Dep...) {
+		got = append(got, spec.Path)
+	}
+	for _, want := range []string{"database/sql", "github.com/jackc/pgx/v5/pgtype"} {
+		if !slices.Contains(got, want) {
+			t.Errorf("imports = %v, want %q among them", got, want)
+		}
+	}
+
+	// And the enum a dynamic parameter reaches must survive filtering.
+	enums, structs := filterUnusedStructs(
+		[]Enum{{Name: "Mood"}, {Name: "Unused"}},
+		[]Struct{{Name: "User"}},
+		[]Query{q})
+	if len(enums) != 1 || enums[0].Name != "Mood" {
+		t.Errorf("enums = %v, want just Mood", enums)
+	}
+	if len(structs) != 0 {
+		t.Errorf("structs = %v, want none: nothing refers to User", structs)
+	}
+}
+
+// The identifier minted for the template cannot collide with one sqlc already owns. The helper
+// had a test; the call site did not, and reverting either the taken-name collection or the call
+// to uniqueName left the suite green.
+func TestTemplateVarDoesNotCollideAtTheCallSite(t *testing.T) {
+	req := request("postgresql")
+	req.Queries = []*plugin.Query{
+		withParam(aQuery("select id from users where 1 = 1 /*%if a*/ and status = $1 /*%end*/"),
+			"status", "string"),
+		aQuery("select id from users"),
+	}
+	req.Queries[0].Name = "Search"
+	// sqlc names this one's constant `searchTemplate`, which is exactly what the minted
+	// identifier would otherwise be.
+	req.Queries[1].Name = "SearchTemplate"
+	qs, err := buildQueries(req, options(), nil)
+	if err != nil {
+		t.Fatalf("buildQueries: %v", err)
+	}
+	var v, taken string
+	for _, q := range qs {
+		if q.Dynamic {
+			v = q.TemplateVar
+		} else {
+			taken = q.ConstantName
+		}
+	}
+	if v == "" || taken == "" {
+		t.Fatalf("want one dynamic and one static query, got %d", len(qs))
+	}
+	if v == taken {
+		t.Errorf("the template variable %q collides with the constant %q", v, taken)
+	}
 }

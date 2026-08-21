@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	exprast "github.com/expr-lang/expr/ast"
+	"github.com/expr-lang/expr/builtin"
 	"github.com/expr-lang/expr/parser"
 
 	"github.com/mpyw/sqlc-gen-go-dynamic/internal/sqltmpl/ast"
@@ -108,21 +109,21 @@ func (in *inferrer) bind(n ast.Bind) {
 		in.unify(t, Slice, "sqlc.slice()", n.Name)
 		target = t.elem()
 	}
-	in.unify(target, kindOfGoType(p.GoType), "sqlc parameter", n.Name)
+	// sqlc's own type is recorded before the shapes are reconciled, so that a disagreement
+	// between it and what an expression proved can name both sides.
 	target.GoType, target.Explicit = p.GoType, p.Explicit
+	in.unify(target, kindOfGoType(p.GoType), "sqlc parameter", n.Name)
 
-	// Follow sqlc verbatim on nullability. NotNull is false for both sqlc.narg('x') and a
-	// plain sqlc.arg('x') against a nullable column — the request does not distinguish them
-	// — and there is no need to: a nullable Go type for either is what sqlc's own Go codegen
-	// emits, so existing queries keep the types their authors expect.
-	if !p.NotNull {
-		target.Optional = true
-	}
-
-	// Sitting inside /*%if*/ or /*%for*/ is deliberately not a source of optionality: when
-	// the branch does not render, nothing reads the value, so the zero value is a fine
+	// Nullability is followed verbatim, which means it is not touched here. sqlc has already
+	// chosen a type that expresses absence for a nullable column — sql.NullString,
+	// pgtype.Text, *string under emit_pointers_for_null_types — and adding a pointer on top
+	// of that gave a dynamic query a different type from the static one beside it in the same
+	// file, up to **string.
+	//
+	// Sitting inside /*%if*/ or /*%for*/ is deliberately not a source of optionality either:
+	// when the branch does not render, nothing reads the value, so the zero value is a fine
 	// stand-in. What does force a pointer is a nil test in a condition, where unset and zero
-	// must be distinguishable or the branch decision itself is wrong.
+	// have to be distinguishable or the branch decision itself is wrong.
 }
 
 // condition infers types for the variables of a directive condition, which is
@@ -425,7 +426,8 @@ func copyKnown(src, dst *Type) bool {
 		learned = true
 	}
 	// The Go type only travels with a shape that agrees; otherwise the alias would stamp a
-	// concrete type onto a variable pinned to something else.
+	// concrete type onto a variable pinned to something else. The caller checks that too, so
+	// this is the guard rather than the only one.
 	if dst.GoType == "" && src.GoType != "" && dst.Kind == src.Kind {
 		dst.GoType, dst.Explicit = src.GoType, src.Explicit
 		learned = true
@@ -591,15 +593,17 @@ func (in *inferrer) unify(t *Type, kind Kind, why, path string) {
 	}
 	if kind == Opaque {
 		// A scalar sqlc named cannot replace a shape something else proved: a slice a
-		// /*%for*/ iterates, or a struct a member access reached.
-		if t.Kind == Slice || t.Kind == Struct {
-			in.diags = append(in.diags, Diagnostic{
-				Path: path,
-				Msg:  fmt.Sprintf("used as a %s but sqlc types it as %s", t.Kind, t.GoType),
-			})
-			return
-		}
-		t.Kind, t.why = kind, why
+		// /*%for*/ iterates, a struct a member access reached, or a scalar a condition
+		// compared with a literal. The last of those used to be accepted silently, and it is
+		// the one that matters most: a condition is walked before the bind it guards, so the
+		// silent path was the usual one, and at run time a named type does not compare equal
+		// to a literal — the branch simply never fires.
+		in.diags = append(in.diags, Diagnostic{
+			Path: path,
+			Msg: fmt.Sprintf("used as a %s but sqlc types it as %s, which cannot be compared "+
+				"with a %s: gate the branch on a separate boolean parameter, or override the "+
+				"column's type", t.Kind, t.GoType, t.Kind),
+		})
 		return
 	}
 	in.diags = append(in.diags, Diagnostic{
@@ -624,11 +628,17 @@ func (in *inferrer) checkUndecided(t *Type, path string) {
 		}
 		in.checkUndecided(t.Elem, path+"[]")
 	case Struct:
+		// The root is allowed to hold nothing: a template whose only directive is a literal
+		// condition has no variables, and refusing that refused a working query. A nested
+		// struct with no fields is different — something named it and then said nothing about
+		// it, so there is no type to generate.
 		if len(t.Fields()) == 0 {
-			in.diags = append(in.diags, Diagnostic{
-				Path: path,
-				Msg:  "is a struct with no fields, so nothing said what it holds" + advice,
-			})
+			if path != "" {
+				in.diags = append(in.diags, Diagnostic{
+					Path: path,
+					Msg:  "is a struct with no fields, so nothing said what it holds" + advice,
+				})
+			}
 			return
 		}
 		for _, m := range t.Fields() {
@@ -643,6 +653,12 @@ func (in *inferrer) checkUndecided(t *Type, path string) {
 
 // checkNames reports a name that cannot become an exported Go identifier, so the complaint
 // names the template's own spelling rather than surfacing as a syntax error in generated code.
+//
+// It also reports a top-level name that the expression language has already taken. Those are
+// its builtin functions, and a scope entry does not shadow one: the name resolves to the
+// function, so `/*%if len*/` is a type error at run time and `filter.active` cannot compile —
+// every call of the generated method would fail. Only the top level collides; a member is read
+// from a value and never from the builtin namespace.
 func (in *inferrer) checkNames(t *Type, path string) {
 	switch t.Kind {
 	case Slice:
@@ -662,10 +678,37 @@ func (in *inferrer) checkNames(t *Type, path string) {
 				})
 				continue
 			}
+			if path == "" && builtinNames[fold(m.Name)] {
+				in.diags = append(in.diags, Diagnostic{
+					Path: sub,
+					Msg: "is the name of one of the expression language's own functions, which " +
+						"a condition cannot see past; rename it in the template",
+				})
+				continue
+			}
 			in.checkNames(m.Type, sub)
 		}
 	}
 }
+
+// builtinNames is what the expression language resolves before it looks at the scope. Taking it
+// from the library keeps the two in step: a release that adds a function makes this refuse the
+// name rather than generate code that cannot run.
+var builtinNames = func() map[string]bool {
+	m := make(map[string]bool, len(builtin.Names))
+	for _, n := range builtin.Names {
+		m[fold(n)] = true
+	}
+	// The parser resolves these to a call with a predicate before the scope is consulted, and
+	// they are not in the list above.
+	for _, n := range []string{
+		"all", "any", "one", "none", "filter", "map", "count", "find", "findIndex",
+		"findLast", "findLastIndex", "groupBy", "sortBy", "reduce", "sum",
+	} {
+		m[fold(n)] = true
+	}
+	return m
+}()
 
 // refusal explains why a variable has no type and what the author can do about it.
 func refusal(t *Type) string {

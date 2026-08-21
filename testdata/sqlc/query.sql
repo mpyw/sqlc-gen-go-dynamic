@@ -8,6 +8,7 @@ where 1 = 1
   /*%if activeOnly*/ and status = @status /*%end*/
   /*%if minAge != null*/ and age >= @min_age /*%end*/
   /*%if ids != null*/ and id in (sqlc.slice(ids)) /*%end*/
+  /*%if since != null*/ and seen_at > @since /*%end*/
   /*%for c in conds*/ and (name like sqlc.arg('c.name') or status = sqlc.arg('c.status')) /*%end*/
 order by /*%if byName*/ name, /*%end*/ id;
 

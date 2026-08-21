@@ -35,7 +35,7 @@ func Render(nodes []ast.Node, params any, d dialect.Dialect, ev Evaluator) (Resu
 	if err != nil {
 		return Result{}, err
 	}
-	r := &renderer{d: d, ev: ev, elems: map[string]any{}}
+	r := &renderer{d: d, ev: ev, raw: params, elems: map[string]any{}}
 	if err := r.nodes(nodes, sc); err != nil {
 		return Result{}, err
 	}
@@ -46,9 +46,13 @@ type renderer struct {
 	d   dialect.Dialect
 	ev  Evaluator
 	sql strings.Builder
-	// elems holds each loop variable's element as it was. The scope holds a converted copy
-	// so that a condition can read the element's fields, which the expression language
-	// resolves by exact name; a bind of the element as a whole has to get the value back.
+	// raw is the params value as the caller passed it. A bind resolves from here rather than
+	// from the scope, so that what reaches the driver is what was given: the scope is a
+	// folded view built for the expression language, and handing one of its maps to a driver
+	// in place of a struct is a wrong value, not a wrong name.
+	raw any
+	// elems holds each loop variable's element as it came, keyed by the folded name, for the
+	// same reason.
 	elems map[string]any
 	args  []any
 }
@@ -68,7 +72,7 @@ func (r *renderer) node(n ast.Node, sc Scope) error {
 		r.sql.WriteString(n.S)
 		return nil
 	case ast.Bind:
-		return r.bind(n, sc)
+		return r.bind(n)
 	case ast.If:
 		return r.conditional(n, sc)
 	case ast.For:
@@ -80,8 +84,8 @@ func (r *renderer) node(n ast.Node, sc Scope) error {
 // bind resolves the marker's name as a path rather than an expression: a marker is always a
 // name, so it needs no evaluator, and resolving it here keeps the folded-name rules in one
 // place.
-func (r *renderer) bind(n ast.Bind, sc Scope) error {
-	v, ok := r.resolve(sc, n.Name)
+func (r *renderer) bind(n ast.Bind) error {
+	v, ok := r.resolve(n.Name)
 	if !ok {
 		return fmt.Errorf("template: no value for parameter %q", n.Name)
 	}
@@ -108,16 +112,17 @@ func (r *renderer) bind(n ast.Bind, sc Scope) error {
 	return nil
 }
 
-// resolve reads the value a marker names. A loop variable on its own is the element itself,
-// not the scope built from it: converting is for the expression language's benefit, and a bind
-// of the whole element must not see the conversion.
-func (r *renderer) resolve(sc Scope, path string) (any, bool) {
-	if !strings.Contains(path, ".") {
-		if v, ok := r.elems[path]; ok {
+// resolve reads the value a marker names, from the values the caller passed. A loop variable
+// is looked up first, since it shadows a param of the same name for the length of its body.
+func (r *renderer) resolve(path string) (any, bool) {
+	head, rest, _ := strings.Cut(path, ".")
+	if v, ok := r.elems[fold(head)]; ok {
+		if rest == "" {
 			return v, true
 		}
+		return rawLookup(v, rest)
 	}
-	return lookup(sc, path)
+	return rawLookup(r.raw, path)
 }
 
 func (r *renderer) conditional(n ast.If, sc Scope) error {
@@ -158,19 +163,23 @@ func (r *renderer) loop(n ast.For, sc Scope) error {
 	for k, e := range sc {
 		inner[k] = e
 	}
+	// The loop variable is a name like any other, so it is keyed folded on both sides: a
+	// condition or a marker inside the body may spell it either way, and the compile-time
+	// inference already assumes they agree.
+	key := fold(n.Var)
 	// A nested loop may reuse the name, so the outer element is restored on the way out.
-	outer, hadOuter := r.elems[n.Var]
+	outer, hadOuter := r.elems[key]
 	defer func() {
 		if hadOuter {
-			r.elems[n.Var] = outer
+			r.elems[key] = outer
 			return
 		}
-		delete(r.elems, n.Var)
+		delete(r.elems, key)
 	}()
 
 	for _, e := range elems {
-		inner[n.Var] = elementScope(e)
-		r.elems[n.Var] = e
+		inner[key] = converted(e, 0)
+		r.elems[key] = e
 		if err := r.nodes(n.Body, inner); err != nil {
 			return err
 		}

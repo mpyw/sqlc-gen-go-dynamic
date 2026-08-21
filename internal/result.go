@@ -390,7 +390,12 @@ func buildQueries(req *plugin.GenerateRequest, options *opts.Options, structs []
 			gq.TemplateVar = uniqueName(sdk.LowerTitle(query.Name)+"Template", taken)
 			gq.DynamicDecls = dyn.Decls
 			gq.DynamicTypes = dyn.Types
-			gq.Arg = QueryValue{Name: "arg", Typ: dyn.ParamsType, SQLDriver: sqlpkg}
+			gq.Arg = QueryValue{
+				Name:        "arg",
+				Typ:         dyn.ParamsType,
+				SQLDriver:   sqlpkg,
+				EmitPointer: options.EmitParamsStructPointers,
+			}
 		}
 
 		qs = append(qs, gq)

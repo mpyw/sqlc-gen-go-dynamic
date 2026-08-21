@@ -13,3 +13,29 @@ sql:
         options:
           package: gen
           sql_package: pgx/v5
+  # The same static queries through both paths, for each driver: what this plugin emits for a
+  # query with no directives has to be what sqlc's own generator emits, byte for byte.
+  - engine: postgresql
+    schema: schema.sql
+    queries: static.sql
+    codegen:
+      - plugin: dynamic
+        out: p_pgx
+        options: { package: db, sql_package: pgx/v5, emit_interface: true, emit_sql_as_comment: true }
+  - engine: postgresql
+    schema: schema.sql
+    queries: static.sql
+    gen:
+      go: { package: db, out: g_pgx, sql_package: pgx/v5, emit_interface: true, emit_sql_as_comment: true }
+  - engine: postgresql
+    schema: schema.sql
+    queries: static.sql
+    codegen:
+      - plugin: dynamic
+        out: p_std
+        options: { package: db, sql_package: database/sql, emit_interface: true, emit_sql_as_comment: true }
+  - engine: postgresql
+    schema: schema.sql
+    queries: static.sql
+    gen:
+      go: { package: db, out: g_std, sql_package: database/sql, emit_interface: true, emit_sql_as_comment: true }

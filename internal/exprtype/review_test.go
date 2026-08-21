@@ -17,38 +17,75 @@ import (
 
 // Every variable a condition mentions has to reach the params struct, however deeply it is
 // buried in an expression the walker cannot reduce to a place.
+//
+// The assertion is structural — the field is looked up in the shape, and a diagnostic is matched
+// by its Path — because the first version of this test compared against rendered text and every
+// case but one passed for the wrong reason: the wanted names were single letters, and the advice
+// appended to a refusal happens to contain every letter of the alphabet worth wanting. Reverting
+// all three fixes it was written for left it green.
 func TestNoVariableIsSilentlyDropped(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		cond string
-		want []string // fields that must appear, or diagnostics that must name them
+		want []string // variables that must be declared, or named by a diagnostic
 	}{
-		{"a non-literal element of a literal set", "status in ['a', fallbackStatus]", []string{"fallbackStatus"}},
-		{"an operand of a sign", "-(a + b)", []string{"a", "b"}},
-		{"a doubled sign", "--a", []string{"a"}},
-		{"an argument of a nested builtin", "len(len(a))", []string{"a"}},
-		{"an operand of a chained nil test", "a == null == null", []string{"a"}},
-		{"a member of a call's result", "map(a, #.b)[0] == 'x'", []string{"a"}},
-		{"a member of a coalesce", "(a ?? b).c", []string{"a", "b"}},
-		{"an element of a literal array", "[a, b][0]", []string{"a", "b"}},
-		{"an argument of a predicate builtin", "find(a, # > 1) == nil", []string{"a"}},
+		{"a non-literal element of a literal set", "status in ['a', alpha]", []string{"alpha"}},
+		{"an operand of a sign", "-(alpha + beta)", []string{"alpha", "beta"}},
+		{"a doubled sign", "--alpha", []string{"alpha"}},
+		{"an argument of a nested builtin", "len(len(alpha))", []string{"alpha"}},
+		{"an operand of a chained nil test", "alpha == null == null", []string{"alpha"}},
+		{"a member of a call's result", "map(alpha, #.b)[0] == 'x'", []string{"alpha"}},
+		{"a member of a coalesce", "(alpha ?? beta).c", []string{"alpha", "beta"}},
+		{"an element of a literal array", "[alpha, beta][0]", []string{"alpha", "beta"}},
+		{"an argument of a predicate builtin", "find(alpha, # > 1) == nil", []string{"alpha"}},
+		{"both sides of an arithmetic comparison", "alpha * 2 > beta", []string{"alpha", "beta"}},
+		{"a nested member", "alpha.one.two == 'x'", []string{"alpha"}},
+		{"an index", "alpha[beta] == 'x'", []string{"alpha", "beta"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			got, diags := infer(t, "/*%if "+c.cond+"*/y/*%end*/")
-			exprtype.NameQuery(got, "Q")
-			seen := exprtype.Declare(got)
-			for _, d := range diags {
-				seen += "\n" + d.String()
-			}
 			for _, w := range c.want {
-				// Either the field is declared, or a diagnostic names it. What must not happen
-				// is neither.
-				if !strings.Contains(strings.ToLower(seen), strings.ToLower(w)) {
-					t.Errorf("%q is mentioned nowhere:\n%s", w, seen)
+				// Either the variable is in the shape, or a diagnostic is about it. What must
+				// not happen is neither: then the generated struct has no field for a name the
+				// condition reads, and the branch silently sees nil.
+				if hasField(got, w) || namedByADiagnostic(diags, w) {
+					continue
 				}
+				t.Errorf("%q is neither declared nor diagnosed\nfields: %v\ndiags: %v",
+					w, fieldNames(got), diags)
 			}
 		})
 	}
+}
+
+// hasField reports whether the shape declares a top-level field of this name.
+func hasField(t *exprtype.Type, name string) bool {
+	for _, m := range t.Fields() {
+		if m.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// namedByADiagnostic reports whether a diagnostic is about this variable, by its path rather
+// than by whether the message happens to contain the letters.
+func namedByADiagnostic(diags []exprtype.Diagnostic, name string) bool {
+	for _, d := range diags {
+		head, _, _ := strings.Cut(d.Path, ".")
+		if strings.TrimSuffix(head, "[]") == name {
+			return true
+		}
+	}
+	return false
+}
+
+func fieldNames(t *exprtype.Type) []string {
+	var out []string
+	for _, m := range t.Fields() {
+		out = append(out, m.Name)
+	}
+	return out
 }
 
 // An equality only pins the two sides to each other. Copying a concrete Go type across one
@@ -293,5 +330,104 @@ func TestOverrideSurvivesAnAlias(t *testing.T) {
 		exprtype.SQLParam{Name: "ov", GoType: "pgtype.Timestamptz", Explicit: true, NotNull: true})
 	if strings.Contains(out, "*pgtype.Timestamptz") {
 		t.Errorf("the override was decorated with a pointer:\n%s", out)
+	}
+}
+
+// sqlc's own type wins over what a condition assumed only when the two can agree. A named type
+// — an enum, a nullable wrapper, an override — does not compare equal to a literal at run time,
+// so a condition that compares one is a branch that never fires.
+//
+// This used to depend on the order the two facts arrived in, and a condition is always walked
+// before the bind it guards, so the silent direction was the usual one.
+func TestSqlcsTypeAndAConditionMustAgree(t *testing.T) {
+	for _, c := range []struct{ name, src, goType string }{
+		{"a condition before the bind", "/*%if a == 'x'*/ b = @a /*%end*/", "sql.NullString"},
+		{"a bind before the condition", "b = @a/*%if a == 'x'*/ c /*%end*/", "sql.NullString"},
+		{"an enum", "/*%if a == 'happy'*/ b = @a /*%end*/", "Mood"},
+		{"a numeric wrapper", "/*%if a > 10*/ b = @a /*%end*/", "pgtype.Numeric"},
+		{"a boolean gate on a wrapper", "/*%if a*/ b = @a /*%end*/", "sql.NullBool"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, diags := infer(t, c.src, exprtype.SQLParam{Name: "a", GoType: c.goType})
+			if len(diags) == 0 {
+				t.Fatalf("want a diagnostic: %s cannot be compared the way the condition does", c.goType)
+			}
+			if !strings.Contains(diags[0].Msg, c.goType) {
+				t.Errorf("diagnostic = %v, want it to name the type sqlc chose", diags[0])
+			}
+		})
+	}
+}
+
+// The nil test is the case that must keep working: it says nothing about the shape, so a
+// nullable type is free to be whatever sqlc chose.
+func TestANilTestAgreesWithAnyType(t *testing.T) {
+	for _, goType := range []string{"sql.NullString", "pgtype.Timestamptz", "Mood", "int32"} {
+		_, diags := infer(t, "/*%if a != null*/ b = @a /*%end*/",
+			exprtype.SQLParam{Name: "a", GoType: goType})
+		if len(diags) != 0 {
+			t.Errorf("%s: unexpected diagnostics: %v", goType, diags)
+		}
+	}
+}
+
+// A template can have directives and no variables at all. Refusing an empty params struct
+// refused that, with a message whose path was empty.
+func TestATemplateWithNoVariablesIsFine(t *testing.T) {
+	got, diags := infer(t, "/*%if true*/ and status = 'active' /*%end*/")
+	if len(diags) != 0 {
+		t.Fatalf("unexpected diagnostics: %v", diags)
+	}
+	if len(got.Fields()) != 0 {
+		t.Errorf("fields = %v, want none", fieldNames(got))
+	}
+	// A variable that nothing decides is still refused; the root's emptiness is the only case
+	// that became legal.
+	// Two unknowns compared with each other decide nothing.
+	if _, diags := infer(t, "/*%if a == b*/x/*%end*/"); len(diags) == 0 {
+		t.Error("want an undecided variable still refused")
+	}
+}
+
+// A name that folds onto one of the expression language's own functions resolves to the
+// function, not to the scope: the generated code would compile and then fail on every call.
+func TestABuiltinNameIsRefused(t *testing.T) {
+	for _, name := range []string{"filter", "len", "map", "sortBy", "sort_by", "Filter"} {
+		_, diags := infer(t, "/*%if "+name+"*/x/*%end*/")
+		if len(diags) == 0 {
+			t.Errorf("%s: want it refused as a name the expression language has taken", name)
+		}
+	}
+	// A name that merely contains one is fine.
+	if _, diags := infer(t, "/*%if lengthy*/x/*%end*/"); len(diags) != 0 {
+		t.Errorf("lengthy: unexpected diagnostics: %v", diags)
+	}
+	// And so is a member of that name: only the top level is resolved against the builtins.
+	if _, diags := infer(t, "/*%if a.filter*/x/*%end*/"); len(diags) != 0 {
+		t.Errorf("a.filter: unexpected diagnostics: %v", diags)
+	}
+}
+
+// sqlc has already chosen a type that expresses absence for a nullable column, so a pointer on
+// top of it made the dynamic query's params differ from the static ones beside them — up to
+// **string. A pointer is added only where absence has nowhere else to live.
+func TestAPointerIsAddedOnlyWhereItIsNeeded(t *testing.T) {
+	for _, c := range []struct{ name, src, goType, want string }{
+		{"nullable, no nil test", "/*%if g*/a = @a/*%end*/", "sql.NullString", "A sql.NullString"},
+		{"nullable and already a pointer", "/*%if g*/a = @a/*%end*/", "*string", "A *string"},
+		{"not null, nil-tested", "/*%if a != null*/a = @a/*%end*/", "int32", "A *int32"},
+		{"nullable, nil-tested", "/*%if a != null*/a = @a/*%end*/", "sql.NullString", "A *sql.NullString"},
+		{"a pointer, nil-tested", "/*%if a != null*/a = @a/*%end*/", "*string", "A *string"},
+		// sqlc's type for a slice parameter arrives with one [] already taken off, because the
+		// marker is what says the bind expands.
+		{"a slice needs no pointer", "a in (sqlc.slice(a))", "int64", "A []int64"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			notNull := !strings.Contains(c.name, "nullable") && !strings.Contains(c.name, "a pointer,")
+			out := declare(t, c.src, exprtype.SQLParam{Name: "a", GoType: c.goType, NotNull: notNull})
+			if !strings.Contains(strings.Join(strings.Fields(out), " "), c.want) {
+				t.Errorf("want %q in:\n%s", c.want, out)
+			}
+		})
 	}
 }

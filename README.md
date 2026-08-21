@@ -109,8 +109,23 @@ render is never counted and the numbering has no gaps.
   than tolerated.
 - **Anchor every dynamic fragment.** `where 1 = 1` then `and …` per fragment; `order by` ends
   with a stable key; a comma list gets a base element.
-- **Keep the select list static.** Toggling a column changes the row struct, and there is only
-  one of those.
+- **Keep the select list static.** sqlc types the row from the query with every directive
+  stripped, so there is one row struct and a branch cannot change what the query returns.
+  Adding a column is loud — `Scan` gets the wrong count. Swapping one is silent:
+  `select id, /*%if x*/ name /*%else*/ status /*%end*/` reads to sqlc as `name AS status`, so
+  the count and the types agree and the wrong column arrives in the field named after the
+  other one. A directive among the columns of a `:one`/`:many` query is therefore refused.
+- **On SQLite, do not end a statement with a directive.** sqlc's SQLite frontend drops a block
+  comment in that position, so the `/*%end*/` never reaches the plugin — and with several
+  queries in one file the dropped tail bleeds into the next query's text. Put the anchor after
+  it: `/*%end*/ and 1 = 1`, an `order by`, or a `returning` clause. The resulting error says so.
+- **Write `sqlc.arg(name)` rather than `@name` next to an operator, and always on MySQL.**
+  PostgreSQL has operators ending in `@` (`<@`, `@@`, `@>`), so sqlc reads the name after one as
+  part of the operator and reports no parameter — `where id=@id` binds nothing, in `gen: go`
+  too. MySQL does not support the `@name` shortcut at all, where it is a user variable.
+- **A name may not be one of the expression language's own functions.** `len`, `filter`, `map`,
+  `sortBy` and the rest resolve before the scope is consulted, so a parameter of that name
+  could never be read. Refused with the name.
 - **Name a nil-tested variable after the bind it guards.** `minAge != null` and `@min_age`
   have to land on the same field for the type (from sqlc) and the optionality (from the
   condition) to meet.
@@ -119,6 +134,21 @@ render is never counted and the numbering has no gaps.
   array. `sqlc.arg(x)::text` fixes both. For row comparisons the better fix is an anchored
   list: a `1 = 0` seed with one `or (a = @x and b = @y)` per element, which types correctly
   with no casts.
+
+## How a name resolves
+
+Case and underscores carry no meaning in a name, at every level. `minAge`, `min_age` and
+`MinAge` are one name, so a condition and the marker beside it may spell it differently and
+sqlc's column name, the template's spelling and the Go field all meet. Two names that differ
+only that way are an error rather than a coin toss.
+
+A name nothing supplies reads as nil, so a condition on it is false. That is what makes an
+absent parameter a skipped branch — and it is also why a typo is a branch that silently never
+fires, which is the one failure this cannot catch for you.
+
+An empty `sqlc.slice` renders as `null`. `in (null)` matches nothing, which is what an empty
+`IN` means; `not in (null)` also matches nothing, which is *not* what an empty `NOT IN` means,
+so an exclusion list needs a guard of its own.
 
 ## How a type is decided
 
@@ -148,10 +178,24 @@ In practice a `len` guard sits on a collection the query also iterates, and the 
 Refusal is reserved for a variable that genuinely appears nowhere else — where there is no
 type to be found, only one to be invented.
 
+**Nullability is sqlc's.** A nullable column already has a type that expresses absence —
+`sql.NullString`, `pgtype.Text`, `*string` under `emit_pointers_for_null_types` — and that is
+the type a dynamic query gets, the same one the static query beside it gets. A pointer is added
+only where absence has nowhere else to live: a nil test on a `NOT NULL` parameter, where unset
+and zero have to be told apart.
+
+**A condition cannot compare a named type with a literal.** An enum, a nullable wrapper or an
+overridden type does not compare equal to `'happy'` at run time, so
+`/*%if mood == 'happy'*/` would be a branch that never fires. It is refused, naming the type
+sqlc chose; gate the branch on a separate boolean parameter instead.
+
 ## What is not supported
 
 - `/*%if*/` or `/*%for*/` in `:copyfrom` and the `:batch` forms, which build their SQL by
   other means. Refused rather than silently ignoring the directives.
+- `rename` on a dynamic query's params fields: they are named from the template's own
+  spellings, so a renamed column keeps its default Go name there while the static query beside
+  it honours the option.
 - `@include`, and it cannot be here: the directive is a comment to sqlc, so an included
   fragment is never analyzed — a bind inside it would get no type while the runtime bound it
   anyway. Composition has to run upstream of sqlc, which makes it a separate tool.
@@ -221,6 +265,25 @@ Every one of these was a measurement, not a deduction.
   would, and would send it to the database.
 - `sqlc.slice` parameters arrive already typed as a slice, so the shape must not make one
   twice.
+- **`Parameter.number` is not the placeholder's position.** It is sqlc's own analysis number,
+  and reading it puts every marker in the wrong place while every consistency check still
+  passes. For `select … where status = @st … limit ?` sqlc numbers the LIMIT placeholder 1 and
+  `@st` 3, with `@st` first in the text — and sqlc's own generated code passes the arguments in
+  the order it *reports* the parameters, not in number order. So the placeholder a driver
+  numbers n is the nth parameter reported, and that is the only sound mapping. A placeholder
+  that carries no number takes one more than the highest so far, which is what SQLite does too.
+- **A repeated `sqlc.slice` is identified by the name in sqlc's own marker comment.** SQLite
+  gives the second occurrence no number of its own (sqlc's generated code replaces only the
+  first, so the query it sends is broken), and counting placeholders there takes the next
+  parameter instead — a different one, restored into the wrong place, undetectably. MySQL
+  reports one parameter per occurrence; PostgreSQL repeats the number.
+- **What a span means differs by engine, and reading it wrong turns a legal query into a build
+  failure.** A backslash escapes a quote in MySQL and not under PostgreSQL's
+  `standard_conforming_strings` — where reading one runs past the real closing quote, so the
+  next quote *opens* a span and the SQL between two literals is read as code. Block comments
+  nest in PostgreSQL alone, so `/** a /* b */` is a whole comment elsewhere. `$tag$…$tag$`
+  strings are PostgreSQL's alone; a MySQL identifier may contain dollars. `#` is a line comment
+  in MySQL and an operator in PostgreSQL.
 
 ## Development
 

@@ -175,10 +175,7 @@ func GoType(t *Type) string {
 	case Struct:
 		// A Go struct value is never nil, so a nil test on one would be a tautology unless it
 		// can hold nil.
-		if t.Optional && !t.Explicit {
-			return "*" + t.Name
-		}
-		return t.Name
+		return optional(t, t.Name)
 	case Slice:
 		// A nil slice already expresses "absent", so optionality needs no pointer.
 		if t.Elem == nil {
@@ -201,10 +198,17 @@ func GoType(t *Type) string {
 			base = "any"
 		}
 	}
-	if t.Optional && !t.Explicit {
-		return "*" + base
+	return optional(t, base)
+}
+
+// optional adds the pointer a nil test needs, unless the type is one already. A nil test has to
+// tell "not supplied" from "supplied as the zero value", which a pointer does; a type that is
+// already a pointer says it without another layer.
+func optional(t *Type, base string) string {
+	if !t.Optional || t.Explicit || strings.HasPrefix(base, "*") {
+		return base
 	}
-	return base
+	return "*" + base
 }
 
 // Types lists every Go type the declarations mention, deduplicated. Import resolution and

@@ -147,13 +147,12 @@ func (t *Type) elem() *Type {
 	return t.Elem
 }
 
-// Member is one field of a struct type. Spellings lists every name the template used for it,
-// which is what a generated scope has to be keyed by: a condition may write minAge while the
-// marker beside it writes min_age, and both have to resolve.
+// Member is one field of a struct type. One name is enough: the runtime folds both the keys of
+// a scope and the names an expression looks up, so a condition writing minAge and a marker
+// writing min_age reach the same field without either spelling being recorded here.
 type Member struct {
-	Name      string
-	Spellings []string
-	Type      *Type
+	Name string
+	Type *Type
 }
 
 func contains(ss []string, s string) bool {
@@ -170,7 +169,7 @@ func (t *Type) Fields() []Member {
 	out := make([]Member, 0, len(t.order))
 	for _, k := range t.order {
 		f := t.fields[k]
-		out = append(out, Member{Name: f.name, Spellings: f.seen, Type: f.typ})
+		out = append(out, Member{Name: f.name, Type: f.typ})
 	}
 	return out
 }

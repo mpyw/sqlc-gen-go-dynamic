@@ -8,8 +8,8 @@
 package query
 
 import (
+	"errors"
 	"fmt"
-	"sort"
 
 	"github.com/mpyw/sqlc-gen-go-dynamic/internal/bind"
 	"github.com/mpyw/sqlc-gen-go-dynamic/internal/exprtype"
@@ -17,6 +17,7 @@ import (
 	"github.com/mpyw/sqlc-gen-go-dynamic/internal/placeholder"
 	"github.com/mpyw/sqlc-gen-go-dynamic/internal/sqltmpl/ast"
 	"github.com/mpyw/sqlc-gen-go-dynamic/internal/sqltmpl/parser"
+	"github.com/mpyw/sqlc-gen-go-dynamic/internal/sqltmpl/scan"
 )
 
 // Param is one entry of sqlc's parameter table, with its Go type already mapped. One type
@@ -26,22 +27,9 @@ type Param struct {
 	Number   int
 	Name     string
 	GoType   string
-	Import   string // the package GoType needs, empty for a builtin
-	Explicit bool   // the type came from an override, so nothing is added to it
+	Explicit bool // the type came from an override, so it is rendered as written
 	NotNull  bool
 	IsSlice  bool
-}
-
-// Column is one result column. Embed names a table when the column stands for the whole of
-// it, which is what sqlc.embed reports; sqlc has already expanded the call into the column
-// list by then, so the name is all that is left of it.
-type Column struct {
-	Name     string
-	GoType   string
-	Import   string // the package GoType needs, empty for a builtin
-	Explicit bool   // the type came from an override, so nothing is added to it
-	NotNull  bool
-	Embed    string
 }
 
 // Input is one query as sqlc reports it.
@@ -52,7 +40,6 @@ type Input struct {
 	Comments []string // Query.comments
 	Engine   string   // settings.engine
 	Params   []Param
-	Row      []Column
 }
 
 // Query is a prepared query.
@@ -62,11 +49,7 @@ type Query struct {
 	Template string     // canonical: markers restored, ready to embed and to render
 	Nodes    []ast.Node // parsed once, for both typing and rendering
 	Params   *exprtype.Type
-	Row      []Column
 	Engine   string
-
-	// Imports are the packages this query's types need, deduplicated.
-	Imports []string
 }
 
 // HasDirectives reports whether anything in the template has to be decided per call. A
@@ -100,52 +83,48 @@ func Prepare(in Input) (*Query, []exprtype.Diagnostic, error) {
 	}
 	tmpl, err := placeholder.Restore(in.Text, restoreParams(in.Params), style)
 	if err != nil {
-		return nil, nil, fmt.Errorf("%s: %w", in.Name, err)
+		return nil, nil, fmt.Errorf("%s: %w%s", in.Name, err, sqliteTail(in.Engine, err))
 	}
 	nodes, err := parser.Parse(tmpl, bind.RulesFor(in.Engine))
 	if err != nil {
+		return nil, nil, fmt.Errorf("%s: %w%s", in.Name, err, sqliteTail(in.Engine, err))
+	}
+	if err := lint.SelectList(tmpl, in.Cmd, bind.RulesFor(in.Engine)); err != nil {
 		return nil, nil, fmt.Errorf("%s: %w", in.Name, err)
 	}
 	params, diags := exprtype.Infer(nodes, typeParams(in.Params))
 	exprtype.NameQuery(params, in.Name)
 	return &Query{
-		Imports:  imports(in),
 		Name:     in.Name,
 		Cmd:      in.Cmd,
 		Template: tmpl,
 		Nodes:    nodes,
 		Params:   params,
-		Row:      in.Row,
 		Engine:   in.Engine,
 	}, diags, nil
 }
 
-// imports collects the packages the query's types need. exprtype carries only type names, so
-// the paths have to travel beside them.
-func imports(in Input) []string {
-	seen := map[string]bool{}
-	var out []string
-	add := func(p string) {
-		if p == "" || seen[p] {
-			return
-		}
-		seen[p] = true
-		out = append(out, p)
+// sqliteTail explains an unbalanced template on SQLite, where the usual cause is not the
+// author's mistake: sqlc's SQLite frontend drops a block comment that ends a statement, so the
+// /*%end*/ that closed the last block never arrives — and with several queries in one file the
+// dropped tail bleeds into the next query's text. Either half of the comment may survive, so
+// both shapes get the explanation.
+func sqliteTail(engine string, err error) string {
+	if engine != "sqlite" {
+		return ""
 	}
-	for _, p := range in.Params {
-		add(p.Import)
+	if !errors.Is(err, parser.ErrUnclosed) && !errors.Is(err, scan.ErrUnterminatedComment) {
+		return ""
 	}
-	for _, c := range in.Row {
-		add(c.Import)
-	}
-	sort.Strings(out)
-	return out
+	return "; on SQLite a statement cannot end with a directive — sqlc drops a block comment in " +
+		"that position, so put the anchor after it (`/*%end*/ and 1 = 1`, an `order by`, or a " +
+		"`returning` clause)"
 }
 
 func restoreParams(ps []Param) []placeholder.Param {
 	out := make([]placeholder.Param, len(ps))
 	for i, p := range ps {
-		out[i] = placeholder.Param{Number: p.Number, Name: p.Name, List: p.IsSlice}
+		out[i] = placeholder.Param{Name: p.Name, List: p.IsSlice}
 	}
 	return out
 }
